@@ -5,8 +5,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+echo "==> Salvando mudanças locais (stash)"
+git stash
+
 echo "==> Atualizando codigo (git pull)"
 git pull --ff-only origin main
+
+echo "==> Aplicando mudanças locais de volta (stash pop - pode falhar, ok)"
+git stash pop || echo "Nenhuma mudança local para restaurar (ok)"
 
 echo "==> Instalando dependencias da API"
 npm ci
