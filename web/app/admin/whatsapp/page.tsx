@@ -30,7 +30,7 @@ type NotificationsResponse = {
 const TRIGGER_LABEL: Record<string, string> = {
   confirmed: "Confirmação",
   reminder_24h: "Lembrete 24h",
-  reminder_2h: "Lembrete 2h",
+  reminder_2h: "Lembrete do dia",
   cancelled: "Cancelamento",
   manager_paid: "Aviso interno",
 };

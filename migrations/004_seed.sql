@@ -35,13 +35,13 @@ VALUES
     (1, 'Manutencao',      'Manutencao de alongamento',     90.00, 'fixed', 20.00,  90, 15);
 
 -- Templates de mensagem (placeholders: {cliente}, {servico}, {data}, {hora},
--- {valor}, {sinal}, {restante}, {studio}, {link}).
+-- {valor}, {sinal}, {restante}, {studio}, {endereco}, {localizacao}, {saudacao}).
 INSERT INTO notification_templates (business_id, trigger_key, channel, body) VALUES
 (1, 'confirmed', 'whatsapp',
- '💅 Agendamento confirmado!\n\nOla, {cliente}! ❤️\nSeu horario foi reservado.\n\nServico: {servico}\n📅 {data}  ⏰ {hora}\n\n💰 Valor: {valor}\n✅ Sinal pago: {sinal}\n💵 Restante: {restante}\n\n📍 {studio}\n\nAte la! 💕'),
+ '{cliente}, seu horário foi agendado!\n\n{data} às {hora}\nServiço: {servico}\nValor: {valor}\n\nEndereço: {endereco}\n\nTe espero no horário combinado! ✨'),
 (1, 'reminder_24h', 'whatsapp',
- 'Ola, {cliente}! 💅\nPassando para lembrar do seu horario amanha.\n\n📅 {data}  ⏰ {hora}\nServico: {servico}\n\nTe esperamos! ❤️'),
+ '{saudacao}, {cliente}! ✨\n\nPassando para te lembrar do seu horário agendado amanhã às {hora}.\n\nEm caso de atraso, temos uma tolerância de 10 minutos e, se possível, venha sem acompanhante. Esse momento é todo seu, te aguardo!'),
 (1, 'reminder_2h', 'whatsapp',
- '{cliente}, seu horario e daqui a 2 horas. 💅\n\n⏰ {hora}\n\nAte ja! ❤️'),
+ '{saudacao}, {cliente}! ✨\n\nPassando para te lembrar do seu horário agendado hoje às {hora}.\n\nNão esqueça de sair com antecedência para evitar o cancelamento automático do seu horário. ✨\n\nLocalização: {localizacao}'),
 (1, 'cancelled', 'whatsapp',
  'Ola, {cliente}. Seu agendamento de {data} as {hora} foi cancelado. Qualquer duvida e so falar com a gente. 💕');

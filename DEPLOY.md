@@ -111,6 +111,7 @@ aponte para a porta **3000** e adicione, **antes** dele, os blocos de `/api` e
 
 ```nginx
 location /api/ {
+    client_max_body_size 8m;
     proxy_pass http://127.0.0.1:3333;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;

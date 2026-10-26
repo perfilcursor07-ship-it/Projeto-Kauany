@@ -36,6 +36,12 @@ type PublicBioLinkRow = {
   sortOrder: number;
 };
 
+type PublicBioDocumentRow = {
+  fileData: string | null;
+  fileName: string | null;
+  fileMime: string | null;
+};
+
 type PublicServiceRow = {
   id: bigint;
   name: string;
@@ -99,6 +105,32 @@ export async function publicRoutes(app: FastifyInstance) {
         sortOrder: link.sortOrder,
       })),
     };
+  });
+
+  app.get('/bio/links/:id/file', async (req, reply) => {
+    const parsed = z.object({ id: z.coerce.bigint() }).safeParse(req.params);
+    if (!parsed.success) return reply.code(404).send({ message: 'Arquivo nao encontrado' });
+
+    const [document] = await prisma.$queryRaw<PublicBioDocumentRow[]>`
+      SELECT file_data AS fileData, file_name AS fileName, file_mime AS fileMime
+      FROM bio_links
+      WHERE id = ${parsed.data.id}
+        AND type = 'document'
+        AND active = TRUE
+      LIMIT 1
+    `;
+    if (!document?.fileData || !document.fileName || !document.fileMime) {
+      return reply.code(404).send({ message: 'Arquivo nao encontrado' });
+    }
+
+    const encodedFileName = encodeURIComponent(document.fileName).replace(/[!'()*]/g, (char) =>
+      `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
+    return reply
+      .type(document.fileMime)
+      .header('Content-Disposition', `attachment; filename*=UTF-8''${encodedFileName}`)
+      .header('X-Content-Type-Options', 'nosniff')
+      .send(Buffer.from(document.fileData, 'base64'));
   });
 
   // --- Lista de servicos ativos ------------------------------------------

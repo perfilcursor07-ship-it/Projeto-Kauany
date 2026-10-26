@@ -27,9 +27,32 @@ type AdminBioLinkRow = {
   label: string;
   url: string | null;
   type: string;
+  fileName: string | null;
   sortOrder: number;
   active: number | boolean;
 };
+
+const MAX_BIO_DOCUMENT_BYTES = 5 * 1024 * 1024;
+const MAX_BIO_DOCUMENT_BASE64_LENGTH = Math.ceil(MAX_BIO_DOCUMENT_BYTES / 3) * 4;
+const BIO_DOCUMENT_BODY_LIMIT = 8 * 1024 * 1024;
+
+function isValidBioDocument(data: string, fileName: string, fileMime: string): boolean {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) return false;
+  const bytes = Buffer.from(data, 'base64');
+  if (bytes.length === 0 || bytes.length > MAX_BIO_DOCUMENT_BYTES) return false;
+
+  const extension = fileName.toLowerCase().split('.').pop();
+  if (extension === 'pdf') {
+    return fileMime === 'application/pdf' && bytes.subarray(0, 5).toString('ascii') === '%PDF-';
+  }
+  if (extension === 'docx') {
+    return (
+      fileMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' &&
+      bytes.subarray(0, 4).toString('ascii') === 'PK\u0003\u0004'
+    );
+  }
+  return false;
+}
 
 function monthRange(month?: string) {
   const now = new Date();
@@ -1053,7 +1076,7 @@ export async function adminRoutes(app: FastifyInstance) {
     `;
 
     const links = await prisma.$queryRaw<AdminBioLinkRow[]>`
-      SELECT id, label, url, type, sort_order AS sortOrder, active
+      SELECT id, label, url, type, file_name AS fileName, sort_order AS sortOrder, active
       FROM bio_links
       WHERE business_id = ${businessId}
       ORDER BY sort_order ASC, id ASC
@@ -1074,6 +1097,7 @@ export async function adminRoutes(app: FastifyInstance) {
         label: link.label,
         url: link.url,
         type: link.type,
+        fileName: link.fileName,
         sortOrder: link.sortOrder,
         active: Boolean(link.active),
       })),
@@ -1131,12 +1155,17 @@ export async function adminRoutes(app: FastifyInstance) {
   const bioLinkSchema = z.object({
     label: z.string().min(2).max(120),
     url: z.string().url().max(800).nullable().optional(),
-    type: z.enum(['external', 'booking']).default('external'),
+    type: z.enum(['external', 'booking', 'document']).default('external'),
+    documentData: z.string().max(MAX_BIO_DOCUMENT_BASE64_LENGTH).optional(),
+    fileName: z.string().min(1).max(255).optional(),
+    fileMime: z
+      .enum(['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'])
+      .optional(),
     sortOrder: z.coerce.number().int().min(0).max(999).default(0),
     active: z.boolean().default(true),
   });
 
-  app.post('/bio/links', async (req, reply) => {
+  app.post('/bio/links', { bodyLimit: BIO_DOCUMENT_BODY_LIMIT }, async (req, reply) => {
     const businessId = businessIdOf(req);
     const parsed = bioLinkSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -1145,14 +1174,31 @@ export async function adminRoutes(app: FastifyInstance) {
     if (parsed.data.type === 'external' && !parsed.data.url) {
       return reply.code(400).send({ message: 'Informe uma URL para link externo.' });
     }
+    if (
+      parsed.data.type === 'document' &&
+      (!parsed.data.documentData || !parsed.data.fileName || !parsed.data.fileMime)
+    ) {
+      return reply.code(400).send({ message: 'Envie um arquivo PDF ou DOCX.' });
+    }
+    if (
+      parsed.data.type === 'document' &&
+      !isValidBioDocument(parsed.data.documentData!, parsed.data.fileName!, parsed.data.fileMime!)
+    ) {
+      return reply.code(400).send({ message: 'O arquivo deve ser um PDF ou DOCX válido de até 5 MB.' });
+    }
+
+    const fileName = parsed.data.fileName?.replace(/[\\/\r\n]/g, '_') ?? null;
 
     await prisma.$executeRaw`
-      INSERT INTO bio_links (business_id, label, url, type, sort_order, active)
+      INSERT INTO bio_links (business_id, label, url, type, file_data, file_name, file_mime, sort_order, active)
       VALUES (
         ${businessId},
         ${parsed.data.label.trim()},
-        ${parsed.data.type === 'booking' ? null : parsed.data.url},
+        ${parsed.data.type === 'external' ? parsed.data.url : null},
         ${parsed.data.type},
+        ${parsed.data.type === 'document' ? parsed.data.documentData! : null},
+        ${parsed.data.type === 'document' ? fileName : null},
+        ${parsed.data.type === 'document' ? parsed.data.fileMime! : null},
         ${parsed.data.sortOrder},
         ${parsed.data.active}
       )
@@ -1161,7 +1207,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return reply.code(201).send({ created: true });
   });
 
-  app.patch('/bio/links/:id', async (req, reply) => {
+  app.patch('/bio/links/:id', { bodyLimit: BIO_DOCUMENT_BODY_LIMIT }, async (req, reply) => {
     const businessId = businessIdOf(req);
     const { id } = z.object({ id: z.coerce.bigint() }).parse(req.params);
     const parsed = bioLinkSchema.partial().safeParse(req.body);
@@ -1170,7 +1216,7 @@ export async function adminRoutes(app: FastifyInstance) {
     }
 
     const [existing] = await prisma.$queryRaw<AdminBioLinkRow[]>`
-      SELECT id, label, url, type, sort_order AS sortOrder, active
+      SELECT id, label, url, type, file_name AS fileName, sort_order AS sortOrder, active
       FROM bio_links
       WHERE id = ${id}
         AND business_id = ${businessId}
@@ -1179,10 +1225,26 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!existing) return reply.code(404).send({ message: 'Link nao encontrado' });
 
     const type = parsed.data.type ?? existing.type;
-    const url = type === 'booking' ? null : parsed.data.url !== undefined ? parsed.data.url : existing.url;
+    const url = type === 'external' ? parsed.data.url !== undefined ? parsed.data.url : existing.url : null;
     if (type === 'external' && !url) {
       return reply.code(400).send({ message: 'Informe uma URL para link externo.' });
     }
+
+    if (type === 'document') {
+      const hasNewDocument = Boolean(parsed.data.documentData && parsed.data.fileName && parsed.data.fileMime);
+      if (!hasNewDocument && (existing.type !== 'document' || !existing.fileName)) {
+        return reply.code(400).send({ message: 'Envie um arquivo PDF ou DOCX.' });
+      }
+      if (
+        hasNewDocument &&
+        !isValidBioDocument(parsed.data.documentData!, parsed.data.fileName!, parsed.data.fileMime!)
+      ) {
+        return reply.code(400).send({ message: 'O arquivo deve ser um PDF ou DOCX válido de até 5 MB.' });
+      }
+    }
+
+    const hasNewDocument = Boolean(parsed.data.documentData && parsed.data.fileName && parsed.data.fileMime);
+    const fileName = hasNewDocument ? parsed.data.fileName!.replace(/[\\/\r\n]/g, '_') : existing.fileName;
 
     await prisma.$executeRaw`
       UPDATE bio_links
@@ -1190,6 +1252,21 @@ export async function adminRoutes(app: FastifyInstance) {
         label = ${parsed.data.label?.trim() ?? existing.label},
         url = ${url},
         type = ${type},
+        file_data = IF(
+          ${type === 'document'},
+          IF(${hasNewDocument}, ${hasNewDocument ? parsed.data.documentData! : null}, file_data),
+          NULL
+        ),
+        file_name = IF(
+          ${type === 'document'},
+          IF(${hasNewDocument}, ${fileName}, file_name),
+          NULL
+        ),
+        file_mime = IF(
+          ${type === 'document'},
+          IF(${hasNewDocument}, ${hasNewDocument ? parsed.data.fileMime! : null}, file_mime),
+          NULL
+        ),
         sort_order = ${parsed.data.sortOrder ?? existing.sortOrder},
         active = ${parsed.data.active ?? Boolean(existing.active)}
       WHERE id = ${id}
@@ -1249,7 +1326,9 @@ export async function adminRoutes(app: FastifyInstance) {
           ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
           ...(parsed.data.slug !== undefined ? { slug: parsed.data.slug } : {}),
           ...(parsed.data.logoUrl !== undefined ? { logoUrl: parsed.data.logoUrl } : {}),
-          ...(parsed.data.phone !== undefined ? { phone: parsed.data.phone } : {}),
+          ...(parsed.data.phone !== undefined
+            ? { phone: parsed.data.phone === null ? null : parsed.data.phone.replace(/\D/g, '') || null }
+            : {}),
         },
       });
       return { name: updated.name, logoUrl: updated.logoUrl, phone: updated.phone, slug: updated.slug };

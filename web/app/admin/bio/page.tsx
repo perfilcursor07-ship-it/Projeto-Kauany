@@ -17,7 +17,8 @@ type BioLink = {
   id: string;
   label: string;
   url: string | null;
-  type: "external" | "booking";
+  type: "external" | "booking" | "document";
+  fileName: string | null;
   sortOrder: number;
   active: boolean;
 };
@@ -36,6 +37,7 @@ type LinkForm = {
 };
 
 const MAX_IMAGE_BYTES = 900 * 1024;
+const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
 
 const emptyLink: LinkForm = {
   label: "",
@@ -61,10 +63,13 @@ export default function BioPage() {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [selectedDocument, setSelectedDocument] = useState<File | null>(null);
+  const [savedDocumentName, setSavedDocumentName] = useState<string | null>(null);
 
   const avatarRef = useRef<HTMLInputElement>(null);
   const coverRef = useRef<HTMLInputElement>(null);
   const backgroundRef = useRef<HTMLInputElement>(null);
+  const documentRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     load();
@@ -126,6 +131,8 @@ export default function BioPage() {
 
   function editLink(link: BioLink) {
     setEditingId(link.id);
+    setSelectedDocument(null);
+    setSavedDocumentName(link.type === "document" ? link.fileName : null);
     setForm({
       label: link.label,
       url: link.url ?? "",
@@ -138,6 +145,30 @@ export default function BioPage() {
   function resetLinkForm() {
     setEditingId(null);
     setForm(emptyLink);
+    setSelectedDocument(null);
+    setSavedDocumentName(null);
+    if (documentRef.current) documentRef.current.value = "";
+  }
+
+  function pickDocument(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    const validType = extension === "pdf" || extension === "docx";
+    if (!validType) {
+      setError("Selecione um arquivo PDF ou DOCX válido.");
+      setSelectedDocument(null);
+      e.target.value = "";
+      return;
+    }
+    if (file.size > MAX_DOCUMENT_BYTES) {
+      setError("Arquivo muito grande. Use um PDF ou DOCX com até 5 MB.");
+      setSelectedDocument(null);
+      e.target.value = "";
+      return;
+    }
+    setError(null);
+    setSelectedDocument(file);
   }
 
   async function saveLink(e: React.FormEvent) {
@@ -146,13 +177,24 @@ export default function BioPage() {
     setError(null);
     setMsg(null);
     try {
+      const documentData =
+        form.type === "document" && selectedDocument
+          ? await readFileAsBase64(selectedDocument)
+          : null;
       await api(editingId ? `/api/admin/bio/links/${editingId}` : "/api/admin/bio/links", {
         method: editingId ? "PATCH" : "POST",
         auth: true,
         body: JSON.stringify({
           label: form.label.trim(),
           type: form.type,
-          url: form.type === "booking" ? null : form.url.trim(),
+          url: form.type === "external" ? form.url.trim() : null,
+          ...(form.type === "document" && documentData && selectedDocument
+            ? {
+                documentData,
+                fileName: selectedDocument.name,
+                fileMime: documentMime(selectedDocument),
+              }
+            : {}),
           sortOrder: Number(form.sortOrder),
           active: form.active,
         }),
@@ -284,7 +326,9 @@ export default function BioPage() {
               <h2 className="font-display text-xl text-sand-900">
                 {editingId ? "Editar botão" : "Novo botão"}
               </h2>
-              <p className="mt-1 text-sm text-sand-500">Crie links para WhatsApp, localização, serviços ou agendamento.</p>
+              <p className="mt-1 text-sm text-sand-500">
+                Crie botões para WhatsApp, localização, serviços, agendamento ou arquivos.
+              </p>
             </div>
             {editingId && (
               <button
@@ -313,6 +357,7 @@ export default function BioPage() {
               >
                 <option value="external">Link externo</option>
                 <option value="booking">Agendamento do sistema</option>
+                <option value="document">Upload de arquivo (PDF ou DOCX)</option>
               </select>
             </label>
             {form.type === "external" && (
@@ -322,6 +367,33 @@ export default function BioPage() {
                 onChange={(url) => setForm({ ...form, url })}
                 placeholder="https://..."
               />
+            )}
+            {form.type === "document" && (
+              <div>
+                <span className="mb-1 block text-xs font-medium text-sand-600">Arquivo PDF ou DOCX</span>
+                <input
+                  ref={documentRef}
+                  type="file"
+                  accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  className="hidden"
+                  onChange={pickDocument}
+                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (documentRef.current) documentRef.current.value = "";
+                      documentRef.current?.click();
+                    }}
+                    className="rounded-lg border border-accent-200 bg-accent-50 px-3 py-2.5 text-sm font-medium text-accent-700 hover:bg-accent-100"
+                  >
+                    {selectedDocument || savedDocumentName ? "Trocar arquivo" : "Selecionar arquivo"}
+                  </button>
+                  <span className="min-w-0 truncate text-xs text-sand-500">
+                    {selectedDocument?.name || savedDocumentName || "Nenhum arquivo selecionado (máximo 5 MB)"}
+                  </span>
+                </div>
+              </div>
             )}
             <div className="grid grid-cols-2 gap-3">
               <Field
@@ -341,7 +413,12 @@ export default function BioPage() {
               </label>
             </div>
             <button
-              disabled={saving || form.label.trim().length < 2 || (form.type === "external" && !form.url.trim())}
+              disabled={
+                saving ||
+                form.label.trim().length < 2 ||
+                (form.type === "external" && !form.url.trim()) ||
+                (form.type === "document" && !selectedDocument && !savedDocumentName)
+              }
               className="w-full rounded-lg bg-accent-600 py-3 text-sm font-medium text-white transition hover:bg-accent-700 disabled:opacity-40"
             >
               {saving ? "Salvando..." : editingId ? "Salvar botão" : "Adicionar botão"}
@@ -361,7 +438,7 @@ export default function BioPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="font-semibold text-sand-900">{link.label}</p>
                   <span className="rounded-full bg-accent-50 px-2 py-0.5 text-[11px] font-medium text-accent-700">
-                    {link.type === "booking" ? "Agendamento" : "Link"}
+                    {link.type === "booking" ? "Agendamento" : link.type === "document" ? "Arquivo" : "Link"}
                   </span>
                   {!link.active && (
                     <span className="rounded-full bg-sand-100 px-2 py-0.5 text-[11px] font-medium text-sand-500">
@@ -370,7 +447,12 @@ export default function BioPage() {
                   )}
                 </div>
                 <p className="mt-1 truncate text-xs text-sand-400">
-                  Ordem {link.sortOrder} {link.url ? `- ${link.url}` : "- abre o agendamento"}
+                  Ordem {link.sortOrder}{" "}
+                  {link.type === "document"
+                    ? `- ${link.fileName || "Arquivo enviado"}`
+                    : link.url
+                      ? `- ${link.url}`
+                      : "- abre o agendamento"}
                 </p>
               </div>
               <div className="flex gap-2">
@@ -422,6 +504,28 @@ function Field({
       />
     </label>
   );
+}
+
+function documentMime(file: File) {
+  return file.name.toLowerCase().endsWith(".pdf")
+    ? "application/pdf"
+    : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Não foi possível ler o arquivo selecionado."));
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string" || !result.includes(",")) {
+        reject(new Error("Não foi possível ler o arquivo selecionado."));
+        return;
+      }
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function ImagePicker({

@@ -280,6 +280,9 @@ model BioLink {
   label     String   @db.VarChar(120)
   url       String?  @db.VarChar(800)
   type      String   @default("external") @db.VarChar(30)
+  fileData  String?  @map("file_data") @db.LongText
+  fileName  String?  @map("file_name") @db.VarChar(255)
+  fileMime  String?  @map("file_mime") @db.VarChar(127)
   sortOrder Int      @default(0) @map("sort_order")
   active    Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)

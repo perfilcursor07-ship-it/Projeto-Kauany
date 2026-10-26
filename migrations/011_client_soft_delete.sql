@@ -1,2 +1,3 @@
-ALTER TABLE clients
-    ADD COLUMN deleted_at DATETIME NULL AFTER cancel_count;
+-- Column deleted_at already exists in 001_init.sql, so this migration is a no-op
+-- ALTER TABLE clients
+--     ADD COLUMN deleted_at DATETIME NULL AFTER cancel_count;

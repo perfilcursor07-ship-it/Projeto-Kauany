@@ -81,7 +81,7 @@ type PublicBio = {
     id: string;
     label: string;
     url: string | null;
-    type: "external" | "booking";
+    type: "external" | "booking" | "document";
   }[];
 };
 
@@ -1247,6 +1247,14 @@ function BioLanding({
                 >
                   {link.label}
                 </button>
+              ) : link.type === "document" ? (
+                <a
+                  key={link.id}
+                  href={`/api/public/bio/links/${link.id}/file`}
+                  className="w-full border border-sand-100 bg-white px-5 py-5 text-sm uppercase tracking-wide text-sand-900 shadow-sm transition hover:-translate-y-0.5 hover:border-accent-200 hover:text-accent-700 hover:shadow-md"
+                >
+                  {link.label}
+                </a>
               ) : (
                 <a
                   key={link.id}

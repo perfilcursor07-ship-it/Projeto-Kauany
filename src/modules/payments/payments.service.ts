@@ -9,7 +9,7 @@ import {
   getPaidCharge,
 } from './pagbank.client.js';
 import { expireAppointmentIfNeeded } from '../appointments/appointments.service.js';
-import { renderTemplate, firstName } from '../whatsapp/templates.js';
+import { renderTemplate } from '../whatsapp/templates.js';
 import QRCode from 'qrcode';
 
 // Modo de teste: sem PagBank real. Ativado por PAYMENTS_MODE=fake ou quando
@@ -28,6 +28,15 @@ const fmtDate = (d: Date) =>
   d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
 const fmtTime = (d: Date) =>
   d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+function greetingFor(date: Date, timezone: string): string {
+  const hour = Number(
+    new Intl.DateTimeFormat('pt-BR', { timeZone: timezone, hour: '2-digit', hourCycle: 'h23' }).format(date),
+  );
+  if (hour < 12) return 'Bom Dia';
+  if (hour < 18) return 'Boa Tarde';
+  return 'Boa Noite';
+}
 
 export class PaymentError extends Error {
   constructor(
@@ -266,7 +275,7 @@ async function applyPaidPayment(
     const deposit = Number(appointment.depositAmount);
     const business = await tx.business.findUnique({ where: { id: appointment.businessId } });
     const vars: Record<string, string> = {
-      cliente: firstName(appointment.client.name),
+      cliente: appointment.client.name.trim(),
       servico: appointment.service.name,
       data: fmtDate(appointment.startAt),
       hora: fmtTime(appointment.startAt),
@@ -274,6 +283,8 @@ async function applyPaidPayment(
       sinal: brl(deposit),
       restante: brl(total - deposit),
       studio: business?.name ?? '',
+      endereco: 'https://maps.app.goo.gl/akCuRvFd1vHnUfsZ8?g_st=ic',
+      localizacao: 'https://maps.app.goo.gl/kW2nQ23ksDJDFPBG8?g_st=ic',
     };
 
     // Mensagem para a CLIENTE (usa o template configuravel 'confirmed').
@@ -282,7 +293,9 @@ async function applyPaidPayment(
     });
     const clientBody = tpl
       ? renderTemplate(tpl.body, vars)
-      : `Ola, ${vars.cliente}! Seu agendamento de ${vars.servico} em ${vars.data} as ${vars.hora} esta confirmado. Sinal pago: ${vars.sinal}.`;
+      : `${vars.cliente}, seu horário foi agendado!\n\n${vars.data} às ${vars.hora}\n` +
+        `Serviço: ${vars.servico}\nValor: ${vars.valor}\n\nEndereço: ${vars.endereco}\n\n` +
+        'Te espero no horário combinado! ✨';
 
     await tx.notificationJob.create({
       data: {
@@ -303,12 +316,20 @@ async function applyPaidPayment(
       {
         trigger: 'reminder_24h',
         when: new Date(appointment.startAt.getTime() - 24 * 60 * 60 * 1000),
-        fallback: `Ola, ${vars.cliente}! Passando para lembrar do seu horario amanha: ${vars.servico} as ${vars.hora}. 💅`,
+        fallback:
+          '{saudacao}, {cliente}! ✨\n\n' +
+          'Passando para te lembrar do seu horário agendado amanhã às {hora}.\n\n' +
+          'Em caso de atraso, temos uma tolerância de 10 minutos e, se possível, venha sem acompanhante. ' +
+          'Esse momento é todo seu, te aguardo!',
       },
       {
         trigger: 'reminder_2h',
         when: new Date(appointment.startAt.getTime() - 2 * 60 * 60 * 1000),
-        fallback: `${vars.cliente}, seu horario e daqui a pouco (${vars.hora}). Ate ja! 💅`,
+        fallback:
+          '{saudacao}, {cliente}! ✨\n\n' +
+          'Passando para te lembrar do seu horário agendado hoje às {hora}.\n\n' +
+          'Não esqueça de sair com antecedência para evitar o cancelamento automático do seu horário. ✨\n\n' +
+          'Localização: {localizacao}',
       },
     ];
     for (const r of reminders) {
@@ -323,7 +344,10 @@ async function applyPaidPayment(
           triggerKey: r.trigger,
           channel: 'whatsapp',
           toPhone: appointment.client.phone,
-          body: rtpl ? renderTemplate(rtpl.body, vars) : r.fallback,
+          body: renderTemplate(rtpl?.body ?? r.fallback, {
+            ...vars,
+            saudacao: greetingFor(r.when, business?.timezone ?? 'America/Sao_Paulo'),
+          }),
           scheduledFor: r.when,
           status: 'pending',
         },
