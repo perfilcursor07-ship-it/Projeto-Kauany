@@ -206,6 +206,7 @@ export default function BookingPage() {
   const [forceLookup, setForceLookup] = useState(false);
 
   const [selectedServices, setSelectedServices] = useState<Service[]>([]);
+  const [expandedDescriptionId, setExpandedDescriptionId] = useState<string | null>(null);
   const [date, setDate] = useState("");
   const [dateOffset, setDateOffset] = useState(0);
   const [slots, setSlots] = useState<string[]>([]);
@@ -614,43 +615,66 @@ export default function BookingPage() {
                 {services.length === 0 && !error && (
                   <p className="text-sm text-sand-400">Carregando serviços…</p>
                 )}
-                {services.map((s) => (
-                  <button
-                    type="button"
-                    key={s.id}
-                    onClick={() => toggleService(s)}
-                    aria-pressed={selectedServices.some((selected) => selected.id === s.id)}
-                    disabled={selectedServices.length >= 10 && !selectedServices.some((selected) => selected.id === s.id)}
-                    className={`group flex w-full items-center justify-between gap-4 rounded-xl border p-4 text-left transition hover:-translate-y-0.5 hover:shadow-sm disabled:cursor-not-allowed disabled:opacity-50 ${
-                      selectedServices.some((selected) => selected.id === s.id)
-                        ? "border-[#8b5e3c] bg-[#f7eee7] shadow-sm"
-                        : "border-[#e1d0c3] bg-[#fffaf6] hover:border-[#9b6a47] hover:bg-[#f7eee7]"
-                    }`}
-                  >
-                    <div className="flex items-start gap-3">
-                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border text-xs font-bold ${
-                        selectedServices.some((selected) => selected.id === s.id)
-                          ? "border-[#8b5e3c] bg-[#8b5e3c] text-white"
-                          : "border-[#c9aa93] bg-white text-transparent"
-                      }`} aria-hidden="true">✓</span>
-                      <div>
-                        <p className="font-medium text-[#4a3022]">{s.name}</p>
-                        {s.description && (
-                          <p className="mt-1 max-w-[13rem] text-xs leading-relaxed text-[#75543f] sm:max-w-xs">
-                            {s.description}
-                          </p>
-                        )}
-                        <p className="mt-1 text-xs text-[#8a6a55]">
-                          {durationLabel(s.durationMinutes)}
-                          {s.depositAmount > 0 && ` · sinal ${brl(s.depositAmount)}`}
-                        </p>
-                      </div>
+                {services.map((s) => {
+                  const isSelected = selectedServices.some((selected) => selected.id === s.id);
+                  const hasLongDescription = Boolean(s.description && s.description.length > 110);
+                  const isDescriptionExpanded = expandedDescriptionId === s.id;
+
+                  return (
+                    <div
+                      key={s.id}
+                      className={`overflow-hidden rounded-xl border transition ${
+                        isSelected
+                          ? "border-[#8b5e3c] bg-[#f7eee7] shadow-sm"
+                          : "border-[#e1d0c3] bg-[#fffaf6] hover:border-[#9b6a47]"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleService(s)}
+                        aria-pressed={isSelected}
+                        disabled={selectedServices.length >= 10 && !isSelected}
+                        className="group flex w-full items-center justify-between gap-3 p-3.5 text-left transition hover:bg-[#f7eee7] disabled:cursor-not-allowed disabled:opacity-50 sm:gap-4 sm:p-4"
+                      >
+                        <div className="flex min-w-0 flex-1 items-start gap-3">
+                          <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border text-xs font-bold ${
+                            isSelected
+                              ? "border-[#8b5e3c] bg-[#8b5e3c] text-white"
+                              : "border-[#c9aa93] bg-white text-transparent"
+                          }`} aria-hidden="true">✓</span>
+                          <div className="min-w-0 flex-1">
+                            <p className="font-medium leading-snug text-[#4a3022]">{s.name}</p>
+                            {s.description && (
+                              <p id={`service-description-${s.id}`} className={`mt-1 max-w-[15rem] text-xs leading-relaxed text-[#75543f] sm:max-w-xs ${
+                                hasLongDescription && !isDescriptionExpanded ? "line-clamp-2" : ""
+                              }`}>
+                                {s.description}
+                              </p>
+                            )}
+                            <p className="mt-1.5 text-xs text-[#8a6a55]">
+                              {durationLabel(s.durationMinutes)}
+                              {s.depositAmount > 0 && ` · sinal ${brl(s.depositAmount)}`}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="shrink-0 rounded-full bg-white px-2.5 py-1.5 font-display text-base text-[#6f452d] shadow-sm sm:px-3 sm:text-lg">
+                          {brl(s.price)}
+                        </span>
+                      </button>
+                      {hasLongDescription && (
+                        <button
+                          type="button"
+                          aria-expanded={isDescriptionExpanded}
+                          aria-controls={`service-description-${s.id}`}
+                          onClick={() => setExpandedDescriptionId(isDescriptionExpanded ? null : s.id)}
+                          className="-mt-1 ml-11 mb-3 rounded px-1 text-xs font-semibold text-[#8b5e3c] underline underline-offset-2 hover:text-[#5c3a28]"
+                        >
+                          {isDescriptionExpanded ? "Ver menos" : "Ver descrição completa"}
+                        </button>
+                      )}
                     </div>
-                    <span className="shrink-0 rounded-full bg-white px-3 py-1.5 font-display text-lg text-[#6f452d] shadow-sm">
-                      {brl(s.price)}
-                    </span>
-                  </button>
-                ))}
+                  );
+                })}
               </div>
               {selectedServices.length >= 10 && (
                 <p className="mt-3 text-xs text-[#8a6a55]">Limite de 10 serviços por agendamento.</p>
