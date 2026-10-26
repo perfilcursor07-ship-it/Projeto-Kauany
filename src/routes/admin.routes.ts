@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import {
+  appointmentServiceLabel,
   createPublicAppointment,
   AppointmentError,
 } from '../modules/appointments/appointments.service.js';
@@ -132,7 +133,11 @@ export async function adminRoutes(app: FastifyInstance) {
           startAt: { gte: dayStart, lte: dayEnd },
           status: { in: ['confirmed', 'completed', 'pending_payment'] },
         },
-        include: { service: true, client: { select: { name: true, phone: true } } },
+        include: {
+          service: true,
+          appointmentServices: { include: { service: { select: { name: true } } } },
+          client: { select: { name: true, phone: true } },
+        },
         orderBy: { startAt: 'asc' },
       }),
       prisma.appointment.findMany({
@@ -143,6 +148,7 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         include: {
           service: { select: { name: true } },
+          appointmentServices: { include: { service: { select: { name: true } } } },
           client: { select: { name: true, phone: true } },
         },
         orderBy: { startAt: 'asc' },
@@ -206,7 +212,7 @@ export async function adminRoutes(app: FastifyInstance) {
           time: a.startAt,
           client: a.client.name,
           phone: a.client.phone,
-          service: a.service.name,
+          service: appointmentServiceLabel(a),
           status: a.status,
           paymentStatus: a.paymentStatus,
           total: Number(a.totalAmount),
@@ -219,7 +225,7 @@ export async function adminRoutes(app: FastifyInstance) {
             time: next.startAt,
             client: next.client.name,
             phone: next.client.phone,
-            service: next.service.name,
+            service: appointmentServiceLabel(next),
             total: Number(next.totalAmount),
             deposit: Number(next.depositAmount),
             depositPaid: next.paymentStatus === 'paid',
@@ -230,7 +236,7 @@ export async function adminRoutes(app: FastifyInstance) {
         time: a.startAt,
         client: a.client.name,
         phone: a.client.phone,
-        service: a.service.name,
+        service: appointmentServiceLabel(a),
         status: a.status,
         paymentStatus: a.paymentStatus,
         total: Number(a.totalAmount),
@@ -444,7 +450,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const history = await prisma.appointment.findMany({
       where: { clientId: id, status: { not: 'removed' } },
-      include: { service: { select: { name: true } } },
+      include: {
+        service: { select: { name: true } },
+        appointmentServices: { include: { service: { select: { name: true } } } },
+      },
       orderBy: { startAt: 'desc' },
       take: 50,
     });
@@ -459,7 +468,7 @@ export async function adminRoutes(app: FastifyInstance) {
       history: history.map((a) => ({
         id: a.id,
         date: a.startAt,
-        service: a.service.name,
+        service: appointmentServiceLabel(a),
         amount: Number(a.totalAmount),
         status: a.status,
       })),
@@ -504,6 +513,7 @@ export async function adminRoutes(app: FastifyInstance) {
       where,
       include: {
         service: { select: { name: true } },
+        appointmentServices: { include: { service: { select: { name: true } } } },
         client: { select: { name: true, phone: true } },
         professional: { select: { name: true } },
       },

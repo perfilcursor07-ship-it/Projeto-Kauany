@@ -108,8 +108,9 @@ model Service {
   createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(0)
   updatedAt       DateTime @updatedAt @map("updated_at") @db.DateTime(0)
 
-  business     Business      @relation(fields: [businessId], references: [id])
-  appointments Appointment[]
+  business             Business              @relation(fields: [businessId], references: [id])
+  appointments         Appointment[]
+  appointmentServices AppointmentService[]
 
   @@index([businessId, active, sortOrder])
   @@map("services")
@@ -163,17 +164,31 @@ model Appointment {
   createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(0)
   updatedAt      DateTime @updatedAt @map("updated_at") @db.DateTime(0)
 
-  business     Business     @relation(fields: [businessId], references: [id])
-  client       Client       @relation(fields: [clientId], references: [id])
-  professional Professional @relation(fields: [professionalId], references: [id])
-  service      Service      @relation(fields: [serviceId], references: [id])
-  payments     Payment[]
-  cashTransactions CashTransaction[]
+  business             Business              @relation(fields: [businessId], references: [id])
+  client               Client                @relation(fields: [clientId], references: [id])
+  professional        Professional           @relation(fields: [professionalId], references: [id])
+  service              Service               @relation(fields: [serviceId], references: [id])
+  appointmentServices AppointmentService[]
+  payments             Payment[]
+  cashTransactions     CashTransaction[]
 
   @@index([businessId, professionalId, startAt, endAt])
   @@index([businessId, status])
   @@index([clientId])
   @@map("appointments")
+}
+
+model AppointmentService {
+  appointmentId BigInt @map("appointment_id") @db.UnsignedBigInt
+  serviceId     BigInt @map("service_id") @db.UnsignedBigInt
+  sortOrder     Int    @default(0) @map("sort_order")
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  service     Service     @relation(fields: [serviceId], references: [id])
+
+  @@id([appointmentId, serviceId])
+  @@index([serviceId])
+  @@map("appointment_services")
 }
 
 model Payment {

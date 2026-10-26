@@ -9,6 +9,7 @@ import {
   getAppointmentByToken,
   getPublicAppointmentsByPhone,
   computeDeposit,
+  appointmentServiceLabel,
   AppointmentError,
 } from '../modules/appointments/appointments.service.js';
 import {
@@ -203,13 +204,27 @@ export async function publicRoutes(app: FastifyInstance) {
   app.get('/availability', async (req, reply) => {
     const schema = z.object({
       slug: z.string().optional(),
-      serviceId: z.coerce.bigint(),
+      serviceId: z.coerce.bigint().optional(),
+      serviceIds: z.union([z.string(), z.array(z.string())]).optional(),
       professionalId: z.coerce.bigint().optional(),
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use o formato YYYY-MM-DD'),
     });
     const parsed = schema.safeParse(req.query);
     if (!parsed.success) {
       return reply.code(400).send({ message: 'Parametros invalidos', issues: parsed.error.flatten() });
+    }
+    const rawServiceIds = parsed.data.serviceIds
+      ? (Array.isArray(parsed.data.serviceIds) ? parsed.data.serviceIds : [parsed.data.serviceIds]).flatMap((value) => value.split(','))
+      : [];
+    const serviceIds = rawServiceIds.length > 0
+      ? rawServiceIds.map((value) => value.trim())
+      : parsed.data.serviceId ? [parsed.data.serviceId.toString()] : [];
+    if (
+      serviceIds.length === 0 ||
+      serviceIds.length > 10 ||
+      serviceIds.some((id) => !/^\d+$/.test(id))
+    ) {
+      return reply.code(400).send({ message: 'Selecione entre 1 e 10 servicos validos' });
     }
 
     const business = await resolvePublicBusiness(parsed.data.slug);
@@ -228,7 +243,7 @@ export async function publicRoutes(app: FastifyInstance) {
     const slots = await getAvailableSlots({
       businessId: business.id,
       professionalId,
-      serviceId: parsed.data.serviceId,
+      serviceIds: serviceIds.map((id) => BigInt(id)),
       date: parsed.data.date,
     });
 
@@ -262,7 +277,8 @@ export async function publicRoutes(app: FastifyInstance) {
   app.post('/appointments', async (req, reply) => {
     const schema = z.object({
       slug: z.string().optional(),
-      serviceId: z.coerce.bigint(),
+      serviceId: z.coerce.bigint().optional(),
+      serviceIds: z.array(z.coerce.bigint()).min(1).max(10).optional(),
       professionalId: z.coerce.bigint().optional(),
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       time: z.string().regex(/^\d{2}:\d{2}$/),
@@ -272,6 +288,9 @@ export async function publicRoutes(app: FastifyInstance) {
         email: z.string().email().optional().nullable(),
       }),
       notes: z.string().max(500).optional().nullable(),
+    }).refine((data) => data.serviceIds?.length || data.serviceId !== undefined, {
+      path: ['serviceIds'],
+      message: 'Selecione pelo menos um servico',
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -285,6 +304,7 @@ export async function publicRoutes(app: FastifyInstance) {
       const { appointment, requiresDeposit } = await createPublicAppointment({
         businessId: business.id,
         serviceId: parsed.data.serviceId,
+        serviceIds: parsed.data.serviceIds,
         professionalId: parsed.data.professionalId,
         date: parsed.data.date,
         time: parsed.data.time,
@@ -297,7 +317,7 @@ export async function publicRoutes(app: FastifyInstance) {
         status: appointment.status,
         requiresDeposit,
         appointment: {
-          service: appointment.service.name,
+          service: appointmentServiceLabel(appointment),
           startAt: appointment.startAt,
           endAt: appointment.endAt,
           totalAmount: Number(appointment.totalAmount),
@@ -343,7 +363,7 @@ export async function publicRoutes(app: FastifyInstance) {
           status: appointment.status,
           paymentStatus: appointment.paymentStatus,
           client: appointment.client.name,
-          service: appointment.service.name,
+          service: appointmentServiceLabel(appointment),
           professional: appointment.professional.name,
           startAt: appointment.startAt,
           endAt: appointment.endAt,
@@ -374,7 +394,7 @@ export async function publicRoutes(app: FastifyInstance) {
       token: appointment.token,
       status: appointment.status,
       paymentStatus: appointment.paymentStatus,
-      service: appointment.service.name,
+      service: appointmentServiceLabel(appointment),
       professional: appointment.professional.name,
       startAt: appointment.startAt,
       endAt: appointment.endAt,
@@ -406,7 +426,7 @@ export async function publicRoutes(app: FastifyInstance) {
           qrCodeText: payment.qrCodeText, // copia e cola
           qrCodeImageUrl: payment.qrCodeImageUrl,
         },
-        service: appointment.service.name,
+        service: appointmentServiceLabel(appointment),
         test: isFakeMode(), // frontend mostra "Simular pagamento" quando true
       };
     } catch (err) {

@@ -10,6 +10,7 @@ type Appt = {
   totalAmount: string;
   depositAmount: string;
   service: { name: string };
+  appointmentServices?: { sortOrder: number; service: { name: string } }[];
   client: { name: string; phone: string };
   professional: { name: string };
 };
@@ -281,6 +282,13 @@ export default function AgendaPage() {
       <div className="space-y-3">
         {items.map((a) => {
           const st = STATUS_LABEL[a.status] ?? { label: a.status, cls: "bg-sand-50 border-sand-200" };
+          const serviceLabel = a.appointmentServices?.length
+            ? a.appointmentServices
+                .slice()
+                .sort((first, second) => first.sortOrder - second.sortOrder)
+                .map((item) => item.service.name)
+                .join(" + ")
+            : a.service.name;
           return (
             <div key={a.id} className="rounded-lg border border-accent-100 bg-white p-4 shadow-sm shadow-accent-100/40 transition hover:-translate-y-0.5 hover:shadow-md">
               <div className="flex items-start justify-between">
@@ -291,7 +299,7 @@ export default function AgendaPage() {
                   <div>
                     <p className="font-medium text-sand-900">{a.client.name}</p>
                     <p className="text-xs text-sand-500">
-                      {a.service.name} · {brl(Number(a.totalAmount))} · {a.client.phone}
+                      {serviceLabel} · {brl(Number(a.totalAmount))} · {a.client.phone}
                     </p>
                   </div>
                 </div>

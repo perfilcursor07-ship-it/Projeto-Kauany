@@ -85,7 +85,7 @@ type PublicBio = {
   }[];
 };
 
-const STEPS = ["Serviço", "Data e horário", "Seus dados", "Pagamento"];
+const STEPS = ["Serviços", "Data e horário", "Seus dados", "Pagamento"];
 
 function durationLabel(min: number) {
   const h = Math.floor(min / 60);
@@ -205,7 +205,7 @@ export default function BookingPage() {
   const [forceBooking, setForceBooking] = useState(false);
   const [forceLookup, setForceLookup] = useState(false);
 
-  const [service, setService] = useState<Service | null>(null);
+  const [selectedServices, setSelectedServices] = useState<Service[]>([]);
   const [date, setDate] = useState("");
   const [dateOffset, setDateOffset] = useState(0);
   const [slots, setSlots] = useState<string[]>([]);
@@ -220,6 +220,10 @@ export default function BookingPage() {
   const [confirmed, setConfirmed] = useState(false);
   const [expired, setExpired] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const service = selectedServices[0] ?? null;
+  const totalPrice = selectedServices.reduce((sum, selected) => sum + selected.price, 0);
+  const totalDeposit = selectedServices.reduce((sum, selected) => sum + selected.depositAmount, 0);
+  const totalDuration = selectedServices.reduce((sum, selected) => sum + selected.durationMinutes, 0);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -259,18 +263,18 @@ export default function BookingPage() {
 
   // Carrega horários assim que a data muda (no passo Data e horário).
   useEffect(() => {
-    if (step === 1 && service && date) {
+    if (step === 1 && selectedServices.length > 0 && date) {
       setLoading(true);
       setSlots([]);
       setTime("");
       api<{ slots: string[] }>(
-        `/api/public/availability?serviceId=${service.id}&date=${date}`,
+        `/api/public/availability?serviceIds=${selectedServices.map((selected) => selected.id).join(",")}&date=${date}`,
       )
         .then((r) => setSlots(r.slots))
         .catch((e) => setError(e.message))
         .finally(() => setLoading(false));
     }
-  }, [step, service, date]);
+  }, [step, selectedServices, date]);
 
   useEffect(() => {
     if (!created || !pix || confirmed || expired) return;
@@ -323,7 +327,7 @@ export default function BookingPage() {
   const canSubmitDetails = nameOk && phoneOk && !loading;
   const submitLabel = loading
     ? "Reservando..."
-    : service?.depositAmount && service.depositAmount > 0
+    : totalDeposit > 0
       ? "Confirmar e pagar sinal"
       : "Confirmar agendamento";
 
@@ -388,9 +392,19 @@ export default function BookingPage() {
     setClientLookupMessage(null);
   }
 
-  function chooseService(s: Service) {
+  function toggleService(s: Service) {
+    setSelectedServices((current) => {
+      if (current.some((selected) => selected.id === s.id)) {
+        return current.filter((selected) => selected.id !== s.id);
+      }
+      if (current.length >= 10) return current;
+      return [...current, s];
+    });
+  }
+
+  function continueToDate() {
+    if (selectedServices.length === 0) return;
     const firstAvailableDay = getBookableDays(new Date(), openWeekdays, 0, 1)[0];
-    setService(s);
     setDate(firstAvailableDay ? toDateInput(firstAvailableDay) : "");
     setDateOffset(0);
     setSlots([]);
@@ -404,7 +418,7 @@ export default function BookingPage() {
   }
 
   async function submitAppointment() {
-    if (!service) return;
+    if (selectedServices.length === 0) return;
     setError(null);
     setLoading(true);
     setExpired(false);
@@ -415,7 +429,7 @@ export default function BookingPage() {
       const res = await api<CreateResponse>("/api/public/appointments", {
         method: "POST",
         body: JSON.stringify({
-          serviceId: service.id,
+          serviceIds: selectedServices.map((selected) => selected.id),
           date,
           time,
           client: {
@@ -591,29 +605,46 @@ export default function BookingPage() {
           {step === 0 && (
             <section>
               <h2 className="mb-4 font-display text-2xl text-[#5c3a28]">
-                Escolha seu serviço
+                Escolha seus serviços
               </h2>
+              <p className="mb-4 text-sm text-[#8a6a55]">
+                Você pode selecionar mais de um serviço para reservar tudo no mesmo horário.
+              </p>
               <div className="space-y-2.5">
                 {services.length === 0 && !error && (
                   <p className="text-sm text-sand-400">Carregando serviços…</p>
                 )}
                 {services.map((s) => (
                   <button
+                    type="button"
                     key={s.id}
-                    onClick={() => chooseService(s)}
-                    className="group flex w-full items-center justify-between gap-4 rounded-xl border border-[#e1d0c3] bg-[#fffaf6] p-4 text-left transition hover:-translate-y-0.5 hover:border-[#9b6a47] hover:bg-[#f7eee7] hover:shadow-sm"
+                    onClick={() => toggleService(s)}
+                    aria-pressed={selectedServices.some((selected) => selected.id === s.id)}
+                    disabled={selectedServices.length >= 10 && !selectedServices.some((selected) => selected.id === s.id)}
+                    className={`group flex w-full items-center justify-between gap-4 rounded-xl border p-4 text-left transition hover:-translate-y-0.5 hover:shadow-sm disabled:cursor-not-allowed disabled:opacity-50 ${
+                      selectedServices.some((selected) => selected.id === s.id)
+                        ? "border-[#8b5e3c] bg-[#f7eee7] shadow-sm"
+                        : "border-[#e1d0c3] bg-[#fffaf6] hover:border-[#9b6a47] hover:bg-[#f7eee7]"
+                    }`}
                   >
-                    <div>
-                      <p className="font-medium text-[#4a3022]">{s.name}</p>
-                      {s.description && (
-                        <p className="mt-1 max-w-[13rem] text-xs leading-relaxed text-[#75543f] sm:max-w-xs">
-                          {s.description}
+                    <div className="flex items-start gap-3">
+                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border text-xs font-bold ${
+                        selectedServices.some((selected) => selected.id === s.id)
+                          ? "border-[#8b5e3c] bg-[#8b5e3c] text-white"
+                          : "border-[#c9aa93] bg-white text-transparent"
+                      }`} aria-hidden="true">✓</span>
+                      <div>
+                        <p className="font-medium text-[#4a3022]">{s.name}</p>
+                        {s.description && (
+                          <p className="mt-1 max-w-[13rem] text-xs leading-relaxed text-[#75543f] sm:max-w-xs">
+                            {s.description}
+                          </p>
+                        )}
+                        <p className="mt-1 text-xs text-[#8a6a55]">
+                          {durationLabel(s.durationMinutes)}
+                          {s.depositAmount > 0 && ` · sinal ${brl(s.depositAmount)}`}
                         </p>
-                      )}
-                      <p className="mt-1 text-xs text-[#8a6a55]">
-                        {durationLabel(s.durationMinutes)}
-                        {s.depositAmount > 0 && ` · sinal ${brl(s.depositAmount)}`}
-                      </p>
+                      </div>
                     </div>
                     <span className="shrink-0 rounded-full bg-white px-3 py-1.5 font-display text-lg text-[#6f452d] shadow-sm">
                       {brl(s.price)}
@@ -621,6 +652,32 @@ export default function BookingPage() {
                   </button>
                 ))}
               </div>
+              {selectedServices.length >= 10 && (
+                <p className="mt-3 text-xs text-[#8a6a55]">Limite de 10 serviços por agendamento.</p>
+              )}
+              {selectedServices.length > 0 && (
+                <div className="mt-4 rounded-xl border border-[#ead8ca] bg-[#fffaf6] p-4">
+                  <div className="flex justify-between gap-3 text-sm text-[#6f452d]">
+                    <span>{selectedServices.length} {selectedServices.length === 1 ? "serviço selecionado" : "serviços selecionados"}</span>
+                    <span>{durationLabel(totalDuration)}</span>
+                  </div>
+                  <div className="mt-2 flex justify-between gap-3 font-semibold text-[#4a3022]">
+                    <span>Total</span>
+                    <span>{brl(totalPrice)}</span>
+                  </div>
+                  {totalDeposit > 0 && (
+                    <p className="mt-1 text-right text-xs text-[#8a6a55]">Um único sinal Pix de {brl(totalDeposit)}</p>
+                  )}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={continueToDate}
+                disabled={selectedServices.length === 0}
+                className="mt-5 w-full rounded-lg bg-[#8b5e3c] px-5 py-3 text-sm font-medium text-white transition hover:bg-[#704629] disabled:opacity-40"
+              >
+                Continuar para data e horário
+              </button>
             </section>
           )}
 
@@ -629,8 +686,10 @@ export default function BookingPage() {
             <section>
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="font-display text-2xl text-[#5c3a28]">Escolha data e horário</h2>
-                <span className="rounded-full bg-[#f6eee7] px-3 py-1 text-xs text-[#7d5135]">{service.name}</span>
               </div>
+              <p className="mb-4 text-sm text-[#7d5135]">
+                {selectedServices.map((selected) => selected.name).join(" + ")} · {durationLabel(totalDuration)}
+              </p>
 
               <div className="rounded-2xl border border-[#ead8ca] bg-[#fffaf6] px-3 py-4">
                 <p className="mb-3 text-center text-sm font-bold text-[#6f452d]">
@@ -759,14 +818,14 @@ export default function BookingPage() {
               </div>
 
               <div className="mt-5 rounded-xl border border-[#dbc4b2] bg-[#fff9f4] p-4 text-sm">
-                <Row label="Serviço" value={service.name} />
+                <Row label="Serviços" value={selectedServices.map((selected) => selected.name).join(" + ")} />
                 <Row label="Data / hora" value={`${date.split("-").reverse().join("/")} às ${time}`} />
                 <div className="my-2 border-t border-sand-200" />
-                <Row label="Valor" value={brl(service.price)} strong />
-                {service.depositAmount > 0 && (
+                <Row label="Valor total" value={brl(totalPrice)} strong />
+                {totalDeposit > 0 && (
                   <>
-                    <Row label="Sinal para reservar" value={brl(service.depositAmount)} accent />
-                    <Row label="Restante no atendimento" value={brl(service.price - service.depositAmount)} />
+                    <Row label="Sinal único para reservar" value={brl(totalDeposit)} accent />
+                    <Row label="Restante no atendimento" value={brl(totalPrice - totalDeposit)} />
                   </>
                 )}
               </div>
@@ -798,9 +857,9 @@ export default function BookingPage() {
                     className="min-w-0 flex-1 rounded-lg bg-[#8b5e3c] px-4 py-2.5 text-sm font-semibold leading-tight text-white shadow-sm transition hover:bg-[#704629] disabled:opacity-40"
                   >
                     <span className="block">{submitLabel}</span>
-                    {service.depositAmount > 0 && (
+                    {totalDeposit > 0 && (
                       <span className="block text-[11px] font-medium text-white/85">
-                        Sinal de {brl(service.depositAmount)}
+                        Sinal único de {brl(totalDeposit)}
                       </span>
                     )}
                   </button>

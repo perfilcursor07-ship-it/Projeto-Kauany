@@ -28,17 +28,23 @@ function overlaps(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date): boolean {
 export interface AvailabilityParams {
   businessId: bigint;
   professionalId: bigint;
-  serviceId: bigint;
+  serviceId?: bigint;
+  serviceIds?: bigint[];
   date: string; // YYYY-MM-DD
 }
 
 export async function getAvailableSlots(params: AvailabilityParams): Promise<string[]> {
-  const { businessId, professionalId, serviceId, date } = params;
+  const { businessId, professionalId, date } = params;
 
-  const service = await prisma.service.findFirst({
-    where: { id: serviceId, businessId, active: true },
+  const serviceIds = [...new Set(params.serviceIds ?? (params.serviceId ? [params.serviceId] : []))];
+  if (serviceIds.length === 0 || serviceIds.length > 10) return [];
+
+  const services = await prisma.service.findMany({
+    where: { id: { in: serviceIds }, businessId, active: true },
   });
-  if (!service) return [];
+  if (services.length !== serviceIds.length) return [];
+  const duration = services.reduce((sum, service) => sum + service.durationMinutes, 0);
+  const buffer = services.reduce((sum, service) => sum + service.bufferMinutes, 0);
 
   const weekday = new Date(`${date}T00:00:00`).getDay();
 
@@ -49,9 +55,6 @@ export async function getAvailableSlots(params: AvailabilityParams): Promise<str
 
   const dayStart = atTime(date, hours.openTime);
   const dayEnd = atTime(date, hours.closeTime);
-
-  const duration = service.durationMinutes;
-  const buffer = service.bufferMinutes;
 
   // Janela do dia para buscar agendamentos e bloqueios.
   const rangeStart = new Date(`${date}T00:00:00`);
@@ -74,7 +77,10 @@ export async function getAvailableSlots(params: AvailabilityParams): Promise<str
         },
       ],
     },
-    include: { service: { select: { bufferMinutes: true } } },
+    include: {
+      service: { select: { bufferMinutes: true } },
+      appointmentServices: { include: { service: { select: { bufferMinutes: true } } } },
+    },
   });
 
   const blocks = await prisma.blockedTime.findMany({
@@ -88,10 +94,13 @@ export async function getAvailableSlots(params: AvailabilityParams): Promise<str
 
   // Intervalos ocupados (com buffer do servico existente somado ao fim).
   const busy: Array<{ start: Date; end: Date }> = [
-    ...appointments.map((a) => ({
-      start: a.startAt,
-      end: addMinutes(a.endAt, a.service?.bufferMinutes ?? 0),
-    })),
+    ...appointments.map((a) => {
+      const serviceBuffers = a.appointmentServices.map((item) => item.service.bufferMinutes);
+      const bufferMinutes = serviceBuffers.length
+        ? serviceBuffers.reduce((sum, minutes) => sum + minutes, 0)
+        : a.service?.bufferMinutes ?? 0;
+      return { start: a.startAt, end: addMinutes(a.endAt, bufferMinutes) };
+    }),
     ...blocks.map((b) => ({ start: b.startAt, end: b.endAt })),
   ];
 

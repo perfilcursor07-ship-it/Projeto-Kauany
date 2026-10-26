@@ -8,7 +8,10 @@ import {
   isOrderPaid,
   getPaidCharge,
 } from './pagbank.client.js';
-import { expireAppointmentIfNeeded } from '../appointments/appointments.service.js';
+import {
+  appointmentServiceLabel,
+  expireAppointmentIfNeeded,
+} from '../appointments/appointments.service.js';
 import { renderTemplate } from '../whatsapp/templates.js';
 import QRCode from 'qrcode';
 
@@ -58,7 +61,11 @@ export async function createPixForAppointment(token: string) {
   await expireAppointmentIfNeeded(token);
   const appointment = await prisma.appointment.findUnique({
     where: { token },
-    include: { service: true, client: true },
+    include: {
+      service: true,
+      appointmentServices: { include: { service: true } },
+      client: true,
+    },
   });
 
   if (!appointment) throw new PaymentError(404, 'Agendamento nao encontrado');
@@ -117,7 +124,7 @@ export async function createPixForAppointment(token: string) {
     order = await createPixOrder({
       referenceId: `appt-${appointment.id}-${Date.now()}`,
       amountCents: depositCents,
-      description: `Sinal - ${appointment.service.name}`,
+      description: `Sinal - ${appointmentServiceLabel(appointment)}`,
       customer: {
         name: appointment.client.name,
         email: appointment.client.email,
@@ -258,7 +265,11 @@ async function applyPaidPayment(
     const appointment = await tx.appointment.update({
       where: { id: payment.appointmentId },
       data: { status: 'confirmed', paymentStatus: 'paid' },
-      include: { client: true, service: true },
+      include: {
+        client: true,
+        service: true,
+        appointmentServices: { include: { service: true } },
+      },
     });
 
     // Entrada no caixa.
@@ -267,7 +278,7 @@ async function applyPaidPayment(
         (business_id, appointment_id, payment_id, type, description, category, amount, occurred_at)
       VALUES
         (${appointment.businessId}, ${appointment.id}, ${payment.id}, 'in',
-         ${'Sinal - ' + appointment.service.name}, 'Serviços', ${payment.amount}, NOW())
+         ${'Sinal - ' + appointmentServiceLabel(appointment)}, 'Serviços', ${payment.amount}, NOW())
     `;
 
     // Monta as variaveis das mensagens.
@@ -276,7 +287,7 @@ async function applyPaidPayment(
     const business = await tx.business.findUnique({ where: { id: appointment.businessId } });
     const vars: Record<string, string> = {
       cliente: appointment.client.name.trim(),
-      servico: appointment.service.name,
+      servico: appointmentServiceLabel(appointment),
       data: fmtDate(appointment.startAt),
       hora: fmtTime(appointment.startAt),
       valor: brl(total),

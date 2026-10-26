@@ -25,7 +25,8 @@ export function computeDeposit(
 
 export interface CreateAppointmentInput {
   businessId: bigint;
-  serviceId: bigint;
+  serviceId?: bigint;
+  serviceIds?: bigint[];
   professionalId?: bigint;
   date: string; // YYYY-MM-DD
   time: string; // HH:mm
@@ -34,6 +35,29 @@ export interface CreateAppointmentInput {
   // Quando true (agendamento manual pelo painel), ja cria como confirmado
   // e sem exigir sinal/expiracao.
   confirm?: boolean;
+}
+
+type AppointmentWithServices = {
+  service: { name: string };
+  appointmentServices?: Array<{ sortOrder: number; service: { name: string } }>;
+};
+
+export function appointmentServiceLabel(appointment: AppointmentWithServices): string {
+  const names = (appointment.appointmentServices ?? [])
+    .slice()
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((item) => item.service.name);
+  return names.length > 0 ? names.join(' + ') : appointment.service.name;
+}
+
+function appointmentBufferMinutes(appointment: {
+  service?: { bufferMinutes: number } | null;
+  appointmentServices?: Array<{ service: { bufferMinutes: number } }>;
+}): number {
+  const serviceBuffers = appointment.appointmentServices?.map((item) => item.service.bufferMinutes);
+  return serviceBuffers?.length
+    ? serviceBuffers.reduce((sum, minutes) => sum + minutes, 0)
+    : appointment.service?.bufferMinutes ?? 0;
 }
 
 export class AppointmentError extends Error {
@@ -64,12 +88,34 @@ export async function expireAppointmentIfNeeded(token: string) {
 }
 
 export async function createPublicAppointment(input: CreateAppointmentInput) {
-  const { businessId, serviceId, date, time, client, notes } = input;
+  const { businessId, date, time, client, notes } = input;
 
-  const service = await prisma.service.findFirst({
-    where: { id: serviceId, businessId, active: true },
+  const requestedServiceIds = [...new Set(input.serviceIds ?? (input.serviceId ? [input.serviceId] : []))];
+  if (requestedServiceIds.length === 0 || requestedServiceIds.length > 10) {
+    throw new AppointmentError(400, 'Selecione entre 1 e 10 servicos');
+  }
+
+  const servicesById = await prisma.service.findMany({
+    where: { id: { in: requestedServiceIds }, businessId, active: true },
   });
-  if (!service) throw new AppointmentError(404, 'Servico nao encontrado');
+  if (servicesById.length !== requestedServiceIds.length) {
+    throw new AppointmentError(404, 'Um ou mais servicos nao foram encontrados');
+  }
+  const services = requestedServiceIds.map((id) => servicesById.find((service) => service.id === id)!);
+  const primaryService = services[0]!;
+  const totalDurationMinutes = services.reduce((sum, service) => sum + service.durationMinutes, 0);
+  const totalBufferMinutes = services.reduce((sum, service) => sum + service.bufferMinutes, 0);
+  const totalAmount = services.reduce(
+    (sum, service) => sum.add(service.price),
+    new Prisma.Decimal(0),
+  );
+  const depositCents = Math.min(
+    services.reduce(
+      (sum, service) => sum + Math.round(computeDeposit(service.price, service.depositType, service.depositValue) * 100),
+      0,
+    ),
+    Math.round(Number(totalAmount) * 100),
+  );
 
   // Resolve profissional (usa o informado ou o primeiro ativo do negocio).
   let professionalId = input.professionalId;
@@ -89,10 +135,10 @@ export async function createPublicAppointment(input: CreateAppointmentInput) {
   if (startAt <= new Date()) {
     throw new AppointmentError(400, 'Nao e possivel agendar no passado');
   }
-  const endAt = addMinutes(startAt, service.durationMinutes);
-  const busyEnd = addMinutes(endAt, service.bufferMinutes);
+  const endAt = addMinutes(startAt, totalDurationMinutes);
+  const busyEnd = addMinutes(endAt, totalBufferMinutes);
 
-  const deposit = computeDeposit(service.price, service.depositType, service.depositValue);
+  const deposit = depositCents / 100;
   const requiresDeposit = !input.confirm && deposit > 0;
 
   const token = randomUUID();
@@ -121,11 +167,14 @@ export async function createPublicAppointment(input: CreateAppointmentInput) {
           },
         ],
       },
-      include: { service: { select: { bufferMinutes: true } } },
+      include: {
+        service: { select: { bufferMinutes: true } },
+        appointmentServices: { include: { service: { select: { bufferMinutes: true } } } },
+      },
     });
 
     const conflict = sameDay.some((a) =>
-      overlaps(startAt, busyEnd, a.startAt, addMinutes(a.endAt, a.service?.bufferMinutes ?? 0))
+      overlaps(startAt, busyEnd, a.startAt, addMinutes(a.endAt, appointmentBufferMinutes(a)))
     );
     if (conflict) {
       throw new AppointmentError(409, 'Este horario acabou de ser reservado. Escolha outro.');
@@ -163,18 +212,26 @@ export async function createPublicAppointment(input: CreateAppointmentInput) {
         businessId,
         clientId: dbClient.id,
         professionalId: professionalId!,
-        serviceId,
+        serviceId: primaryService.id,
+        appointmentServices: {
+          create: services.map((service, sortOrder) => ({ serviceId: service.id, sortOrder })),
+        },
         token,
         startAt,
         endAt,
-        totalAmount: service.price,
+        totalAmount,
         depositAmount: new Prisma.Decimal(deposit),
         status: requiresDeposit ? 'pending_payment' : 'confirmed',
         paymentStatus: 'pending',
         expiresAt,
         notes: notes ?? null,
       },
-      include: { service: true, client: true, professional: true },
+      include: {
+        service: true,
+        appointmentServices: { include: { service: true } },
+        client: true,
+        professional: true,
+      },
     });
 
     return { appointment, requiresDeposit };
@@ -187,6 +244,7 @@ export async function getAppointmentByToken(token: string) {
     where: { token },
     include: {
       service: true,
+      appointmentServices: { include: { service: true } },
       professional: { select: { id: true, name: true } },
       client: { select: { name: true, phone: true } },
       payments: {
@@ -217,6 +275,7 @@ export async function getPublicAppointmentsByPhone(businessId: bigint, phone: st
     },
     include: {
       service: true,
+      appointmentServices: { include: { service: true } },
       professional: { select: { id: true, name: true } },
       client: { select: { name: true, phone: true } },
       payments: {
@@ -243,6 +302,7 @@ export async function getPublicAppointmentsByPhone(businessId: bigint, phone: st
     },
     include: {
       service: true,
+      appointmentServices: { include: { service: true } },
       professional: { select: { id: true, name: true } },
       client: { select: { name: true, phone: true } },
       payments: {
