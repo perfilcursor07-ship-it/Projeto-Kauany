@@ -528,7 +528,7 @@ export default function BookingPage() {
   return (
     <main
       className={`min-h-screen bg-gradient-to-b from-[#f6eee7] via-[#fbf7f3] to-sand-50 px-3 py-4 text-sand-900 sm:px-4 sm:py-8 ${
-        step === 2 ? "pb-28 sm:pb-8" : ""
+        step === 0 || step === 2 ? "pb-28 sm:pb-8" : ""
       }`}
     >
       <div className="mx-auto max-w-lg">
@@ -609,7 +609,7 @@ export default function BookingPage() {
                 Escolha seus serviços
               </h2>
               <p className="mb-4 text-sm text-[#8a6a55]">
-                Você pode selecionar mais de um serviço para reservar tudo no mesmo horário.
+                Selecione um ou mais serviços. Confira o total no rodapé.
               </p>
               <div className="space-y-2.5">
                 {services.length === 0 && !error && (
@@ -617,60 +617,63 @@ export default function BookingPage() {
                 )}
                 {services.map((s) => {
                   const isSelected = selectedServices.some((selected) => selected.id === s.id);
-                  const hasLongDescription = Boolean(s.description && s.description.length > 110);
                   const isDescriptionExpanded = expandedDescriptionId === s.id;
 
                   return (
                     <div
                       key={s.id}
-                      className={`overflow-hidden rounded-xl border transition ${
+                      className={`rounded-xl border transition ${
                         isSelected
                           ? "border-[#8b5e3c] bg-[#f7eee7] shadow-sm"
                           : "border-[#e1d0c3] bg-[#fffaf6] hover:border-[#9b6a47]"
                       }`}
                     >
-                      <button
-                        type="button"
-                        onClick={() => toggleService(s)}
-                        aria-pressed={isSelected}
-                        disabled={selectedServices.length >= 10 && !isSelected}
-                        className="group flex w-full items-center justify-between gap-3 p-3.5 text-left transition hover:bg-[#f7eee7] disabled:cursor-not-allowed disabled:opacity-50 sm:gap-4 sm:p-4"
-                      >
-                        <div className="flex min-w-0 flex-1 items-start gap-3">
-                          <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border text-xs font-bold ${
-                            isSelected
-                              ? "border-[#8b5e3c] bg-[#8b5e3c] text-white"
-                              : "border-[#c9aa93] bg-white text-transparent"
-                          }`} aria-hidden="true">✓</span>
-                          <div className="min-w-0 flex-1">
-                            <p className="font-medium leading-snug text-[#4a3022]">{s.name}</p>
-                            {s.description && (
-                              <p id={`service-description-${s.id}`} className={`mt-1 max-w-[15rem] text-xs leading-relaxed text-[#75543f] sm:max-w-xs ${
-                                hasLongDescription && !isDescriptionExpanded ? "line-clamp-2" : ""
-                              }`}>
-                                {s.description}
-                              </p>
-                            )}
-                            <p className="mt-1.5 text-xs text-[#8a6a55]">
-                              {durationLabel(s.durationMinutes)}
-                              {s.depositAmount > 0 && ` · sinal ${brl(s.depositAmount)}`}
-                            </p>
-                          </div>
-                        </div>
-                        <span className="shrink-0 rounded-full bg-white px-2.5 py-1.5 font-display text-base text-[#6f452d] shadow-sm sm:px-3 sm:text-lg">
-                          {brl(s.price)}
+                      <label htmlFor={`service-${s.id}`} className="flex cursor-pointer items-start gap-3 p-3 sm:p-4">
+                        <input
+                          id={`service-${s.id}`}
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleService(s)}
+                          disabled={selectedServices.length >= 10 && !isSelected}
+                          className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-[#8b5e3c] disabled:cursor-not-allowed"
+                          aria-label={`Selecionar ${s.name}`}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 flex-1 text-sm font-semibold leading-snug text-[#4a3022]">
+                              {s.name}
+                            </span>
+                            <span className="shrink-0 rounded-full bg-white px-2.5 py-1 font-display text-base text-[#6f452d] shadow-sm sm:px-3 sm:text-lg">
+                              {brl(s.price)}
+                            </span>
+                          </span>
+                          <span className="mt-1.5 block text-xs text-[#8a6a55]">
+                            {durationLabel(s.durationMinutes)}
+                            {s.depositAmount > 0 && ` · sinal ${brl(s.depositAmount)}`}
+                          </span>
                         </span>
-                      </button>
-                      {hasLongDescription && (
-                        <button
-                          type="button"
-                          aria-expanded={isDescriptionExpanded}
-                          aria-controls={`service-description-${s.id}`}
-                          onClick={() => setExpandedDescriptionId(isDescriptionExpanded ? null : s.id)}
-                          className="-mt-1 ml-11 mb-3 rounded px-1 text-xs font-semibold text-[#8b5e3c] underline underline-offset-2 hover:text-[#5c3a28]"
+                      </label>
+                      {s.description && (
+                        <div className="pb-2 pl-10 pr-3 sm:pr-4">
+                          <button
+                            type="button"
+                            aria-expanded={isDescriptionExpanded}
+                            aria-controls={`service-description-${s.id}`}
+                            onClick={() => setExpandedDescriptionId(isDescriptionExpanded ? null : s.id)}
+                            className="rounded px-1 text-xs font-semibold text-[#8b5e3c] underline underline-offset-2 hover:text-[#5c3a28]"
+                          >
+                            {isDescriptionExpanded ? "Ocultar detalhes" : "Ver detalhes"}
+                          </button>
+                        </div>
+                      )}
+                      {s.description && (
+                        <p
+                          id={`service-description-${s.id}`}
+                          hidden={!isDescriptionExpanded}
+                          className="mx-3 mb-3 ml-10 border-t border-[#ead8ca] pt-2 text-xs leading-relaxed text-[#75543f] sm:mr-4"
                         >
-                          {isDescriptionExpanded ? "Ver menos" : "Ver descrição completa"}
-                        </button>
+                          {s.description}
+                        </p>
                       )}
                     </div>
                   );
@@ -680,7 +683,7 @@ export default function BookingPage() {
                 <p className="mt-3 text-xs text-[#8a6a55]">Limite de 10 serviços por agendamento.</p>
               )}
               {selectedServices.length > 0 && (
-                <div className="mt-4 rounded-xl border border-[#ead8ca] bg-[#fffaf6] p-4">
+                <div className="mt-4 hidden rounded-xl border border-[#ead8ca] bg-[#fffaf6] p-4 sm:block">
                   <div className="flex justify-between gap-3 text-sm text-[#6f452d]">
                     <span>{selectedServices.length} {selectedServices.length === 1 ? "serviço selecionado" : "serviços selecionados"}</span>
                     <span>{durationLabel(totalDuration)}</span>
@@ -698,7 +701,7 @@ export default function BookingPage() {
                 type="button"
                 onClick={continueToDate}
                 disabled={selectedServices.length === 0}
-                className="mt-5 w-full rounded-lg bg-[#8b5e3c] px-5 py-3 text-sm font-medium text-white transition hover:bg-[#704629] disabled:opacity-40"
+                className="mt-5 hidden w-full rounded-lg bg-[#8b5e3c] px-5 py-3 text-sm font-medium text-white transition hover:bg-[#704629] disabled:opacity-40 sm:block"
               >
                 Continuar para data e horário
               </button>
@@ -1001,6 +1004,38 @@ export default function BookingPage() {
           </a>
         </p>
       </div>
+
+      {step === 0 && (
+        <div
+          className="fixed inset-x-0 bottom-0 z-30 border-t border-[#e4d2c3] bg-white/95 px-3 pt-2 shadow-[0_-10px_30px_rgba(127,52,79,0.12)] backdrop-blur sm:hidden"
+          style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
+        >
+          <div className="mx-auto flex max-w-lg items-center justify-between gap-3">
+            <div className="min-w-0">
+              {selectedServices.length > 0 ? (
+                <>
+                  <p className="truncate text-xs font-semibold text-[#5c3a28]">
+                    {selectedServices.length} {selectedServices.length === 1 ? "serviço" : "serviços"} · {durationLabel(totalDuration)}
+                  </p>
+                  <p className="truncate text-xs text-[#8a6a55]">
+                    Total {brl(totalPrice)}{totalDeposit > 0 ? ` · sinal ${brl(totalDeposit)}` : " · sem sinal"}
+                  </p>
+                </>
+              ) : (
+                <p className="text-xs text-[#8a6a55]">Selecione um ou mais serviços</p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={continueToDate}
+              disabled={selectedServices.length === 0}
+              className="shrink-0 rounded-lg bg-[#8b5e3c] px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-[#704629] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Continuar
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
