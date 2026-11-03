@@ -189,6 +189,35 @@ async function resolveJid(sock: WASocket, phone: string): Promise<string | null>
   return null;
 }
 
+// Forma canonica de um numero BR, ignorando o "9" extra do celular.
+// O Baileys reporta o JID legado da conta (55 63 9206-8261), enquanto o numero
+// cadastrado costuma ter o nono digito (55 63 99206-8261). Sao a MESMA linha,
+// entao as duas formas precisam colidir na comparacao.
+export function canonicalPhone(phone: string | null | undefined): string {
+  let digits = (phone ?? '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (!digits.startsWith('55') && digits.length <= 11) digits = '55' + digits;
+  if (!digits.startsWith('55')) return digits;
+
+  const ddd = digits.slice(2, 4);
+  let local = digits.slice(4);
+  if (local.length === 9 && local.startsWith('9')) local = local.slice(1);
+  return '55' + ddd + local;
+}
+
+// true quando os dois numeros apontam para a mesma conta de WhatsApp.
+export function isSamePhone(a: string | null | undefined, b: string | null | undefined): boolean {
+  const ca = canonicalPhone(a);
+  const cb = canonicalPhone(b);
+  return ca !== '' && ca === cb;
+}
+
+// Numero da conta conectada ao robo (ou null se desconectado).
+export function getConnectedPhone(businessId: bigint): string | null {
+  const state = getState(businessId);
+  return state.status === 'connected' ? state.phoneNumber : null;
+}
+
 // Envio humanizado: presenca "digitando" + pausas aleatorias (anti-bloqueio).
 export async function sendText(
   businessId: bigint,
@@ -201,6 +230,18 @@ export async function sendText(
   }
 
   const sock = state.sock;
+
+  // Enviar para a propria conta conectada nao notifica nada: a mensagem cai na
+  // conversa "Mensagem para voce mesmo" com fromMe=true e o WhatsApp nunca
+  // avisa sobre as suas proprias mensagens. Falha explicita em vez de um
+  // "enviada" mentiroso no painel.
+  if (isSamePhone(phone, state.phoneNumber)) {
+    return {
+      ok: false,
+      error: 'Destino e o proprio numero conectado: o WhatsApp nao notifica mensagens para voce mesmo. Cadastre outro numero para os avisos internos.',
+    };
+  }
+
   const jid = await resolveJid(sock, phone);
   if (!jid) return { ok: false, error: 'Numero nao encontrado no WhatsApp' };
 

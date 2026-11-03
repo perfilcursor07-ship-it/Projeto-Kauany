@@ -368,7 +368,14 @@ async function applyPaidPayment(
     // Mensagem para a GESTORA (aviso de sinal recebido).
     // No modo manual isso seria "voce mandando para voce mesma" (o painel ja
     // te avisa), entao so enfileiramos quando o envio e automatico (baileys).
-    if (business?.phone && env.WHATSAPP_MODE === 'baileys') {
+    //
+    // IMPORTANTE: vai para notify_phone, que precisa ser um numero DIFERENTE do
+    // conectado ao robo. Enviar para o proprio numero cai na conversa "Mensagem
+    // para voce mesmo" e o WhatsApp nunca notifica. Sem notify_phone cadastrado
+    // caimos no telefone do studio: o envio falha com um erro explicativo no
+    // painel, em vez de sumir sem deixar rastro.
+    const managerPhone = business?.notifyPhone || business?.phone;
+    if (managerPhone && env.WHATSAPP_MODE === 'baileys') {
       const managerBody =
         `💰 Sinal recebido!\n\n${appointment.client.name} pagou ${vars.sinal} de sinal.\n` +
         `Servico: ${vars.servico}\n📅 ${vars.data} às ${vars.hora}\n` +
@@ -379,7 +386,7 @@ async function applyPaidPayment(
           appointmentId: appointment.id,
           triggerKey: 'manager_paid',
           channel: 'whatsapp',
-          toPhone: business.phone,
+          toPhone: managerPhone,
           body: managerBody,
           scheduledFor: new Date(),
           status: 'pending',

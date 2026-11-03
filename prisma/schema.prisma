@@ -18,6 +18,10 @@ model Business {
   logoUrl   String?  @map("logo_url") @db.LongText
   slug      String   @unique @db.VarChar(120)
   phone     String?  @db.VarChar(30)
+  // Numero que recebe os avisos internos (sinal recebido etc). Precisa ser um
+  // numero DIFERENTE do conectado ao robo: o WhatsApp nao notifica mensagens
+  // que voce envia para voce mesma.
+  notifyPhone String? @map("notify_phone") @db.VarChar(30)
   timezone  String   @default("America/Sao_Paulo") @db.VarChar(60)
   active    Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)

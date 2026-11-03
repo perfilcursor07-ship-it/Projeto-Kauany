@@ -3,7 +3,9 @@ import { z } from 'zod';
 import {
   connectWhatsapp,
   disconnectWhatsapp,
+  getConnectedPhone,
   getWhatsappStatus,
+  isSamePhone,
   sendText,
 } from '../modules/whatsapp/whatsapp.service.js';
 import { prisma } from '../lib/prisma.js';
@@ -54,7 +56,7 @@ export async function whatsappRoutes(app: FastifyInstance) {
     const [business, notifications] = await Promise.all([
       prisma.business.findUnique({
         where: { id: businessId },
-        select: { phone: true },
+        select: { phone: true, notifyPhone: true },
       }),
       prisma.notificationJob.findMany({
         where: { businessId, channel: 'whatsapp' },
@@ -99,15 +101,55 @@ export async function whatsappRoutes(app: FastifyInstance) {
       ] as const),
     );
 
+    // O aviso interno nao chega quando o destino e a propria conta conectada:
+    // o WhatsApp nao notifica mensagens que voce manda para voce mesmo. O
+    // painel precisa dessa informacao para avisar antes de o envio falhar.
+    const connectedPhone = getConnectedPhone(businessId);
+    const notifyPhone = business?.notifyPhone ?? null;
+    const notifyTarget = notifyPhone || business?.phone || null;
+
     return {
       mode: getWhatsappStatus(businessId).mode,
       studioPhone: business?.phone ?? null,
+      notifyPhone,
+      connectedPhone,
+      notifySelfSend: isSamePhone(notifyTarget, connectedPhone),
       notifications: notifications.map(({ id, appointmentId, ...item }) => ({
         ...item,
         id: id.toString(),
         appointment: appointmentId ? appointmentById.get(appointmentId.toString()) ?? null : null,
       })),
     };
+  });
+
+  // Numero que recebe os avisos internos (ex: "sinal recebido").
+  // Precisa ser diferente do numero conectado ao robo.
+  app.put('/notify-phone', async (req, reply) => {
+    const parsed = z
+      .object({ notifyPhone: z.string().max(30).nullable() })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ message: 'Numero invalido' });
+
+    const businessId = businessIdOf(req);
+    const digits = parsed.data.notifyPhone?.replace(/\D/g, '') || null;
+    if (digits && digits.length < 10) {
+      return reply.code(400).send({ message: 'Informe o numero com DDD' });
+    }
+
+    const connectedPhone = getConnectedPhone(businessId);
+    if (digits && isSamePhone(digits, connectedPhone)) {
+      return reply.code(400).send({
+        message:
+          'Este e o proprio numero conectado ao robo. O WhatsApp nao notifica mensagens para voce mesmo: use outro numero (ex: seu WhatsApp pessoal).',
+      });
+    }
+
+    const updated = await prisma.business.update({
+      where: { id: businessId },
+      data: { notifyPhone: digits },
+      select: { notifyPhone: true },
+    });
+    return { notifyPhone: updated.notifyPhone };
   });
 
   // Enfileira uma mensagem individual com o endereco atualizado.

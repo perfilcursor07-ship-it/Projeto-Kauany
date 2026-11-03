@@ -25,6 +25,13 @@ type Notification = {
 type NotificationsResponse = {
   mode: "manual" | "baileys";
   studioPhone: string | null;
+  // Numero que recebe os avisos internos (sinal recebido etc).
+  notifyPhone: string | null;
+  // Numero da conta conectada ao robo.
+  connectedPhone: string | null;
+  // true quando o aviso interno iria para a propria conta conectada: o
+  // WhatsApp nao notifica mensagens que voce manda para voce mesmo.
+  notifySelfSend: boolean;
   notifications: Notification[];
 };
 
@@ -37,6 +44,18 @@ const TRIGGER_LABEL: Record<string, string> = {
   address_update: "Correção de endereço",
 };
 
+// Exibe o numero no formato +55 (DD) 9XXXX-XXXX.
+function formatPhone(phone: string | null) {
+  const d = (phone ?? "").replace(/\D/g, "");
+  if (!d) return "";
+  const local = d.startsWith("55") ? d.slice(2) : d;
+  const ddd = local.slice(0, 2);
+  const rest = local.slice(2);
+  if (rest.length < 8) return `+${d}`;
+  const head = rest.slice(0, rest.length - 4);
+  return `+55 (${ddd}) ${head}-${rest.slice(-4)}`;
+}
+
 // Monta o link wa.me com a mensagem pronta (normaliza o DDI 55).
 function waLink(phone: string, body: string) {
   let digits = phone.replace(/\D/g, "");
@@ -46,7 +65,14 @@ function waLink(phone: string, body: string) {
 
 export default function WhatsappPage() {
   const [st, setSt] = useState<Status>({ mode: "manual", status: "disconnected", phoneNumber: null, qr: null });
-  const [data, setData] = useState<NotificationsResponse>({ mode: "manual", studioPhone: null, notifications: [] });
+  const [data, setData] = useState<NotificationsResponse>({
+    mode: "manual",
+    studioPhone: null,
+    notifyPhone: null,
+    connectedPhone: null,
+    notifySelfSend: false,
+    notifications: [],
+  });
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [resendingId, setResendingId] = useState<string | null>(null);
@@ -249,10 +275,122 @@ export default function WhatsappPage() {
       ) : (
         <>
           <BaileysPanel st={st} onChanged={loadStatus} />
+          <NotifyPhoneCard data={data} onSaved={loadData} />
           <Logs notifications={notifications} onRetry={retry} onResendAddress={resendAddress} resendingId={resendingId} />
         </>
       )}
     </div>
+  );
+}
+
+// Numero que recebe os avisos internos. Precisa ser DIFERENTE do numero
+// conectado ao robo: o WhatsApp nao notifica as suas proprias mensagens, elas
+// caem na conversa "Mensagem para você mesmo" sem nenhum aviso no aparelho.
+function NotifyPhoneCard({
+  data,
+  onSaved,
+}: {
+  data: NotificationsResponse;
+  onSaved: () => Promise<void> | void;
+}) {
+  const [value, setValue] = useState("");
+  const [touched, setTouched] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Enquanto o campo nao for editado, segue o valor que vem do servidor.
+  useEffect(() => {
+    if (!touched) setValue(data.notifyPhone ?? "");
+  }, [data.notifyPhone, touched]);
+
+  async function save(next: string | null) {
+    setBusy(true);
+    setMsg(null);
+    setErr(null);
+    try {
+      await api("/api/admin/whatsapp/notify-phone", {
+        method: "PUT",
+        auth: true,
+        body: JSON.stringify({ notifyPhone: next }),
+      });
+      setTouched(false);
+      setMsg(next ? "Número salvo. Os próximos avisos internos vão para ele." : "Número removido.");
+      await onSaved();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-accent-100 bg-white p-5 shadow-sm shadow-accent-100/40">
+      <h2 className="font-display text-lg text-sand-900">Avisos internos</h2>
+      <p className="mt-1 text-sm text-sand-500">
+        Número que recebe o aviso de <strong>sinal recebido</strong>. Precisa ser um número
+        diferente do que está conectado ao robô
+        {data.connectedPhone ? ` (${formatPhone(data.connectedPhone)})` : ""} — o WhatsApp não
+        notifica mensagens que você manda para você mesma.
+      </p>
+
+      {data.notifySelfSend && (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <p className="font-semibold">O aviso interno não está chegando no celular.</p>
+          <p className="mt-1">
+            Hoje ele vai para o próprio número conectado, então cai na conversa
+            “Mensagem para você mesmo” e o WhatsApp não gera notificação. Cadastre outro
+            número abaixo (ex: seu WhatsApp pessoal).
+          </p>
+        </div>
+      )}
+
+      {err && (
+        <div className="mt-3 rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+          {err}
+        </div>
+      )}
+      {msg && (
+        <div className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+          {msg}
+        </div>
+      )}
+
+      <div className="mt-4 flex flex-wrap items-end gap-2">
+        <label className="flex-1 min-w-[220px] text-sm">
+          <span className="mb-1 block font-medium text-sand-700">Número com DDD</span>
+          <input
+            value={value}
+            onChange={(e) => {
+              setTouched(true);
+              setValue(e.target.value);
+            }}
+            inputMode="numeric"
+            placeholder="63 99999-0000"
+            className="w-full rounded-lg border border-sand-200 px-3 py-2 text-sm text-sand-800 outline-none focus:border-accent-400"
+          />
+        </label>
+        <button
+          onClick={() => save(value.replace(/\D/g, "") || null)}
+          disabled={busy}
+          className="rounded-lg bg-accent-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-accent-700 disabled:opacity-50"
+        >
+          {busy ? "Salvando…" : "Salvar"}
+        </button>
+        {data.notifyPhone && (
+          <button
+            onClick={() => {
+              setValue("");
+              save(null);
+            }}
+            disabled={busy}
+            className="rounded-lg border border-accent-200 bg-accent-50 px-4 py-2.5 text-sm font-medium text-accent-700 hover:bg-accent-100 disabled:opacity-50"
+          >
+            Remover
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 

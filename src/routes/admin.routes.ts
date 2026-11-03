@@ -160,7 +160,7 @@ export async function adminRoutes(app: FastifyInstance) {
         where: {
           businessId,
           startAt: { gte: monthStart, lte: monthEnd },
-          status: { notIn: ['removed', 'expired'] },
+          status: { in: ['confirmed', 'completed', 'pending_payment'] },
         },
         include: {
           service: { select: { name: true } },
