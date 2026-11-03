@@ -364,6 +364,7 @@ model NotificationJob {
   // Confirmacao real de entrega (ACK do WhatsApp). sentAt diz apenas que o
   // socket aceitou; deliveredAt e que prova que chegou no aparelho.
   providerMessageId String? @map("provider_message_id") @db.VarChar(120)
+  serverAckAt   DateTime? @map("server_ack_at") @db.DateTime(0)
   deliveredAt   DateTime? @map("delivered_at") @db.DateTime(0)
   readAt        DateTime? @map("read_at") @db.DateTime(0)
   error         String?   @db.Text

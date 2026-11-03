@@ -21,6 +21,7 @@ type Notification = {
   sentAt: string | null;
   // Confirmacao real de entrega. sentAt so diz que o WhatsApp aceitou.
   tracked: boolean;
+  serverAckAt: string | null;
   deliveredAt: string | null;
   readAt: string | null;
   appointment: { clientName: string; startAt: string; status: string } | null;
@@ -611,6 +612,10 @@ function Logs({
   const unconfirmed = notifications.filter(
     (n) => n.status === "sent" && n.tracked && !n.deliveredAt,
   ).length;
+  // Aceitas pelo servidor do WhatsApp e descartadas antes de chegar.
+  const dropped = notifications.filter(
+    (n) => n.status === "sent" && n.serverAckAt && !n.deliveredAt,
+  ).length;
 
   return (
     <section className="rounded-lg border border-accent-100 bg-white p-5 shadow-sm shadow-accent-100/40">
@@ -629,9 +634,14 @@ function Logs({
           <span className="rounded-full border border-sand-200 bg-sand-50 px-2.5 py-1 font-semibold text-sand-600">
             {sent} aceitas
           </span>
-          {unconfirmed > 0 && (
+          {dropped > 0 && (
+            <span className="rounded-full border border-red-200 bg-red-50 px-2.5 py-1 font-semibold text-red-600">
+              {dropped} descartadas
+            </span>
+          )}
+          {unconfirmed - dropped > 0 && (
             <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 font-semibold text-amber-700">
-              {unconfirmed} sem confirmação
+              {unconfirmed - dropped} sem confirmação
             </span>
           )}
           <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 font-semibold text-amber-700">
@@ -737,9 +747,21 @@ function DeliveryBadge({ n }: { n: Notification }) {
       </span>
     );
   }
+  // O servidor confirmou mas o aparelho nunca confirmou: a mensagem foi aceita
+  // e descartada pelo WhatsApp. E o sintoma de conta nova ou limitada.
+  if (n.serverAckAt) {
+    return (
+      <span
+        title={`O servidor do WhatsApp confirmou em ${formatDateTime(n.serverAckAt)}, mas o aparelho nunca confirmou o recebimento. A mensagem foi aceita e descartada pelo WhatsApp.`}
+        className="inline-flex rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-600"
+      >
+        Parou no servidor
+      </span>
+    );
+  }
   return (
     <span
-      title="O WhatsApp aceitou o envio, mas o aparelho ainda não confirmou o recebimento. Se continuar assim, a mensagem não chegou."
+      title="Nenhuma confirmação chegou do WhatsApp — nem do servidor. Pode ser a conexão do robô ou a mensagem ainda estar a caminho."
       className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700"
     >
       Sem confirmação

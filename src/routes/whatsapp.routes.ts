@@ -122,6 +122,7 @@ export async function whatsappRoutes(app: FastifyInstance) {
           createdAt: true,
           sentAt: true,
           providerMessageId: true,
+          serverAckAt: true,
           deliveredAt: true,
           readAt: true,
         },

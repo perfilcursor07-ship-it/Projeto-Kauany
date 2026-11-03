@@ -101,10 +101,17 @@ export async function connectWhatsapp(businessId: bigint): Promise<ConnStatus> {
   // eventos sao a unica prova de que ela chegou (DELIVERY_ACK) ou foi lida
   // (READ) no aparelho da cliente. Sem isso o painel mostra verde para
   // mensagens que o WhatsApp descartou do lado dele.
+  //
+  // Nao filtramos por key.fromMe: o Baileys monta esse campo a partir dos
+  // atributos do no de recibo e um falso negativo ali faria a mensagem parecer
+  // nao entregue. Casar pelo id ja basta -- providerMessageId so existe em
+  // mensagem que nos enviamos.
   sock.ev.on('messages.update', (updates) => {
     for (const { key, update } of updates) {
-      if (!key.fromMe || !key.id || update.status === undefined || update.status === null) continue;
-      void recordAck(businessId, key.id, update.status).catch(() => {});
+      if (!key.id || update.status === undefined || update.status === null) continue;
+      void recordAck(businessId, key.id, update.status).catch((err) => {
+        console.error('[whatsapp] falha ao gravar ACK', key.id, err);
+      });
     }
   });
 
@@ -190,21 +197,38 @@ export function isConnected(businessId: bigint): boolean {
 }
 
 // proto.WebMessageInfo.Status: 2 = SERVER_ACK, 3 = DELIVERY_ACK, 4 = READ.
+const SERVER_ACK = 2;
 const DELIVERY_ACK = 3;
 const READ_ACK = 4;
 
+const ACK_LABEL: Record<number, string> = {
+  2: 'servidor',
+  3: 'entregue',
+  4: 'lida',
+  5: 'ouvida',
+};
+
 async function recordAck(businessId: bigint, messageId: string, status: number): Promise<void> {
-  if (status < DELIVERY_ACK) return; // SERVER_ACK nao prova entrega
+  if (status < SERVER_ACK) return;
 
   const now = new Date();
 
   // Os ACKs chegam repetidos e fora de ordem. Gravar so quando o campo ainda
   // esta vazio mantem o horario real do primeiro ACK -- caso contrario um ACK
   // de leitura sobrescreveria a hora da entrega.
-  await prisma.notificationJob.updateMany({
-    where: { businessId, providerMessageId: messageId, deliveredAt: null },
-    data: { deliveredAt: now },
+  //
+  // Um ACK mais alto implica os anteriores: quem leu, recebeu.
+  const touched = await prisma.notificationJob.updateMany({
+    where: { businessId, providerMessageId: messageId, serverAckAt: null },
+    data: { serverAckAt: now },
   });
+
+  if (status >= DELIVERY_ACK) {
+    await prisma.notificationJob.updateMany({
+      where: { businessId, providerMessageId: messageId, deliveredAt: null },
+      data: { deliveredAt: now },
+    });
+  }
 
   if (status >= READ_ACK) {
     await prisma.notificationJob.updateMany({
@@ -212,6 +236,12 @@ async function recordAck(businessId: bigint, messageId: string, status: number):
       data: { readAt: now },
     });
   }
+
+  // Log visivel no pm2: prova que os ACKs estao chegando e qual nivel pararam.
+  console.log(
+    `[whatsapp] ACK ${ACK_LABEL[status] ?? status} msg=${messageId} ` +
+      `(${touched.count > 0 ? 'primeira vez' : 'repetido'})`,
+  );
 }
 
 // Normaliza um telefone BR para JID e confirma se existe no WhatsApp.
