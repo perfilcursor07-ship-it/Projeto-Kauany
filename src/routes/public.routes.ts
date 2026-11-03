@@ -8,6 +8,7 @@ import {
   createPublicAppointment,
   getAppointmentByToken,
   getPublicAppointmentsByPhone,
+  getPublicAppointmentByToken,
   computeDeposit,
   appointmentServiceLabel,
   AppointmentError,
@@ -335,11 +336,19 @@ export async function publicRoutes(app: FastifyInstance) {
   });
 
   // --- Consulta de agendamentos pelo WhatsApp da cliente (sem login) -----
+  // Consulta por telefone OU por token.
+  //
+  // O token e o que vai no link da cobranca automatica do sinal: a cliente
+  // abre e cai direto no proprio agendamento, sem digitar nada. As duas formas
+  // devolvem o mesmo formato para a tela nao precisar saber a diferenca.
   app.post('/appointments/lookup', async (req, reply) => {
-    const schema = z.object({
-      slug: z.string().optional(),
-      phone: z.string().min(8),
-    });
+    const schema = z
+      .object({
+        slug: z.string().optional(),
+        phone: z.string().min(8).optional(),
+        token: z.string().uuid().optional(),
+      })
+      .refine((v) => !!v.phone || !!v.token, { message: 'Informe o telefone ou o token' });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ message: 'Dados invalidos', issues: parsed.error.flatten() });
@@ -348,7 +357,9 @@ export async function publicRoutes(app: FastifyInstance) {
     const business = await resolvePublicBusiness(parsed.data.slug);
     if (!business) return reply.code(404).send({ message: 'Negocio nao encontrado' });
 
-    const appointments = await getPublicAppointmentsByPhone(business.id, parsed.data.phone);
+    const appointments = parsed.data.token
+      ? await getPublicAppointmentByToken(business.id, parsed.data.token)
+      : await getPublicAppointmentsByPhone(business.id, parsed.data.phone!);
 
     return {
       business: {

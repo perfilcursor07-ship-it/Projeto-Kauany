@@ -2,6 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { env } from '../../config/env.js';
+import {
+  appointmentLink,
+  FALLBACK_BODIES,
+  firstName,
+  renderTemplate,
+  STUDIO_ADDRESS_URL,
+} from '../whatsapp/templates.js';
+
+const brl = (v: number) =>
+  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v);
 
 function addMinutes(date: Date, minutes: number): Date {
   return new Date(date.getTime() + minutes * 60_000);
@@ -234,6 +244,55 @@ export async function createPublicAppointment(input: CreateAppointmentInput) {
       },
     });
 
+    // Cobranca automatica de quem agenda e nao paga o sinal.
+    //
+    // Enfileirada junto com o agendamento, para sair PAYMENT_REMINDER_MINUTES
+    // depois. O worker so envia se o agendamento ainda estiver esperando
+    // pagamento -- se a cliente pagar antes, o job e cancelado sozinho.
+    //
+    // O link so funciona enquanto a reserva estiver de pe, por isso o aviso
+    // em env.ts de manter RESERVATION_MINUTES maior que este prazo.
+    if (requiresDeposit) {
+      const business = await tx.business.findUnique({
+        where: { id: businessId },
+        select: { name: true },
+      });
+      const vars: Record<string, string> = {
+        cliente: client.name.trim(),
+        primeiro_nome: firstName(client.name),
+        servico: appointmentServiceLabel(appointment),
+        data: startAt.toLocaleDateString('pt-BR', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+        }),
+        hora: startAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        valor: brl(Number(totalAmount)),
+        sinal: brl(deposit),
+        restante: brl(Number(totalAmount) - deposit),
+        studio: business?.name ?? '',
+        link: appointmentLink(env.PUBLIC_WEB_URL, token),
+        endereco: STUDIO_ADDRESS_URL,
+      };
+
+      const tpl = await tx.notificationTemplate.findFirst({
+        where: { businessId, triggerKey: 'payment_pending', channel: 'whatsapp', active: true },
+      });
+
+      await tx.notificationJob.create({
+        data: {
+          businessId,
+          appointmentId: appointment.id,
+          triggerKey: 'payment_pending',
+          channel: 'whatsapp',
+          toPhone: client.phone,
+          body: renderTemplate(tpl?.body ?? FALLBACK_BODIES.payment_pending, vars),
+          scheduledFor: addMinutes(new Date(), env.PAYMENT_REMINDER_MINUTES),
+          status: 'pending',
+        },
+      });
+    }
+
     return { appointment, requiresDeposit };
   });
 }
@@ -253,6 +312,24 @@ export async function getAppointmentByToken(token: string) {
       },
     },
   });
+}
+
+// Mesmo formato do lookup por telefone, mas de um agendamento so -- e o que o
+// link da cobranca abre. Filtra por businessId para um token de outro negocio
+// nao vazar nada.
+export async function getPublicAppointmentByToken(businessId: bigint, token: string) {
+  await expireAppointmentIfNeeded(token);
+  const appointment = await prisma.appointment.findFirst({
+    where: { token, businessId, status: { not: 'removed' } },
+    include: {
+      service: true,
+      appointmentServices: { include: { service: true } },
+      professional: { select: { id: true, name: true } },
+      client: { select: { name: true, phone: true } },
+      payments: { orderBy: { createdAt: 'desc' }, take: 1 },
+    },
+  });
+  return appointment ? [appointment] : [];
 }
 
 export async function getPublicAppointmentsByPhone(businessId: bigint, phone: string) {

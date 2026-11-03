@@ -174,6 +174,30 @@ async function runOnce() {
       }
     }
 
+    // Cobranca do sinal: e o caso inverso. So faz sentido enquanto o
+    // agendamento AINDA espera pagamento. Se a cliente ja pagou, cancelou, ou
+    // a reserva expirou, cobrar seria pior que nao cobrar.
+    if (job.appointmentId && job.triggerKey === 'payment_pending') {
+      const appt = await prisma.appointment.findUnique({
+        where: { id: job.appointmentId },
+        select: { status: true, expiresAt: true },
+      });
+      const expirada = !!appt?.expiresAt && appt.expiresAt <= new Date();
+      if (!appt || appt.status !== 'pending_payment' || expirada) {
+        await prisma.notificationJob.update({
+          where: { id: job.id },
+          data: {
+            status: 'cancelled',
+            error: expirada
+              ? 'reserva expirou antes da cobranca'
+              : 'agendamento nao esta mais aguardando pagamento',
+          },
+        });
+        scheduleNext(3);
+        return;
+      }
+    }
+
     // Limite diario atingido: segura os envios por 15 min.
     const count = await sentTodayCount(job.businessId);
     if (count >= env.WHATSAPP_DAILY_LIMIT) {

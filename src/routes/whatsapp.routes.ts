@@ -9,6 +9,7 @@ import {
   sendText,
 } from '../modules/whatsapp/whatsapp.service.js';
 import { prisma } from '../lib/prisma.js';
+import { env } from '../config/env.js';
 import { recentRejection } from '../modules/whatsapp/notifications.worker.js';
 import {
   DEFAULT_NTFY_SERVER,
@@ -71,7 +72,11 @@ export async function whatsappRoutes(app: FastifyInstance) {
     ]);
 
     const byTrigger = new Map(templates.map((t) => [t.triggerKey, t.body]));
-    const vars = sampleVars(business?.name ?? '', business?.timezone ?? 'America/Sao_Paulo');
+    const vars = sampleVars(
+      business?.name ?? '',
+      business?.timezone ?? 'America/Sao_Paulo',
+      env.PUBLIC_WEB_URL,
+    );
 
     return {
       sample: vars,

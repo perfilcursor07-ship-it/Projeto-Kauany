@@ -57,6 +57,7 @@ const TRIGGER_LABEL: Record<string, string> = {
   reminder_24h: "Lembrete 24h",
   reminder_2h: "Lembrete do dia",
   cancelled: "Cancelamento",
+  payment_pending: "Cobrança do sinal",
   manager_paid: "Aviso interno",
   address_update: "Correção de endereço",
 };

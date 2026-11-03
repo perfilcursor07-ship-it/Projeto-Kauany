@@ -204,6 +204,9 @@ export default function BookingPage() {
   const [queryChecked, setQueryChecked] = useState(false);
   const [forceBooking, setForceBooking] = useState(false);
   const [forceLookup, setForceLookup] = useState(false);
+  // ?agendamento=<token> vem do link da cobranca do sinal: abre o agendamento
+  // da cliente direto, sem ela precisar digitar o telefone.
+  const [directToken, setDirectToken] = useState<string | null>(null);
 
   const [selectedServices, setSelectedServices] = useState<Service[]>([]);
   const [expandedDescriptionId, setExpandedDescriptionId] = useState<string | null>(null);
@@ -229,7 +232,9 @@ export default function BookingPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     setForceBooking(params.get("agendar") === "1");
-    setForceLookup(params.get("consulta") === "1");
+    const token = params.get("agendamento");
+    setDirectToken(token && /^[0-9a-f-]{36}$/i.test(token) ? token : null);
+    setForceLookup(params.get("consulta") === "1" || !!token);
     setQueryChecked(true);
   }, []);
 
@@ -505,7 +510,7 @@ export default function BookingPage() {
     );
   }
 
-  if (bio?.bio.enabled && !forceBooking && !forceLookup) {
+  if (bio?.bio.enabled && !forceBooking && !forceLookup && !directToken) {
     return (
       <BioLanding
         data={bio}
@@ -521,6 +526,7 @@ export default function BookingPage() {
         businessName={businessName}
         logoUrl={logoUrl}
         onBooking={openBooking}
+        directToken={directToken}
       />
     );
   }
@@ -1044,15 +1050,31 @@ function LookupPage({
   businessName,
   logoUrl,
   onBooking,
+  directToken = null,
 }: {
   businessName: string;
   logoUrl: string | null;
   onBooking: () => void;
+  /** Token vindo de ?agendamento=: carrega o agendamento sem pedir telefone. */
+  directToken?: string | null;
 }) {
   const [phone, setPhone] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<LookupResponse | null>(null);
+
+  useEffect(() => {
+    if (!directToken) return;
+    setLoading(true);
+    setError(null);
+    api<LookupResponse>("/api/public/appointments/lookup", {
+      method: "POST",
+      body: JSON.stringify({ token: directToken }),
+    })
+      .then(setResult)
+      .catch((e: any) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [directToken]);
 
   const phoneOk = isBrazilMobile(phone);
 
@@ -1104,12 +1126,18 @@ function LookupPage({
         </div>
 
         <section className="rounded-2xl border border-[#dcc6b5] bg-white p-4 shadow-sm shadow-[#c8a58e]/10 sm:p-6">
-          <h2 className="font-display text-2xl text-[#5c3a28]">Consulte seu agendamento</h2>
+          <h2 className="font-display text-2xl text-[#5c3a28]">
+            {directToken ? "Seu agendamento" : "Consulte seu agendamento"}
+          </h2>
           <p className="mt-1 text-sm leading-6 text-sand-500">
-            Digite o WhatsApp usado no agendamento para ver os próximos atendimentos e o status do pagamento.
+            {directToken
+              ? "Confira os dados abaixo e pague o sinal para confirmar o seu horário."
+              : "Digite o WhatsApp usado no agendamento para ver os próximos atendimentos e o status do pagamento."}
           </p>
 
-          <form onSubmit={submit} className="mt-5 space-y-3">
+          {/* Vindo pelo link da cobranca o agendamento ja carrega sozinho,
+              entao o formulario de telefone so atrapalharia. */}
+          <form onSubmit={submit} className={`mt-5 space-y-3 ${directToken ? "hidden" : ""}`}>
             <Field
               label="WhatsApp"
               value={phone}
@@ -1156,6 +1184,28 @@ function LookupPage({
 }
 
 function AppointmentCard({ appointment }: { appointment: LookupAppointment }) {
+  // Pix gerado aqui na hora. Quem chega pelo link da cobranca costuma ter um
+  // Pix vencido (ou nenhum), e sem este botao a tela vira um beco sem saida.
+  const [novoPix, setNovoPix] = useState<{ qrCodeText: string | null; qrCodeImageUrl: string | null } | null>(null);
+  const [gerando, setGerando] = useState(false);
+  const [erroPix, setErroPix] = useState<string | null>(null);
+
+  async function gerarPix() {
+    setGerando(true);
+    setErroPix(null);
+    try {
+      const r = await api<{ pix: { qrCodeText: string | null; qrCodeImageUrl: string | null } }>(
+        "/api/public/payments/pix",
+        { method: "POST", body: JSON.stringify({ token: appointment.token }) },
+      );
+      setNovoPix(r.pix);
+    } catch (e: any) {
+      setErroPix(e.message);
+    } finally {
+      setGerando(false);
+    }
+  }
+
   const status = APPOINTMENT_STATUS[appointment.status] ?? {
     label: appointment.status,
     className: "border-sand-200 bg-sand-50 text-sand-600",
@@ -1223,9 +1273,44 @@ function AppointmentCard({ appointment }: { appointment: LookupAppointment }) {
             </div>
           </div>
         ) : appointment.status === "pending_payment" ? (
-          <p className="mt-2 text-xs text-sand-500">
-            O pagamento ainda está pendente. Se o Pix expirou, faça um novo agendamento.
-          </p>
+          <div className="mt-3">
+            {novoPix?.qrCodeText ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <p className="text-xs font-semibold uppercase text-amber-700">
+                  Pix gerado — copie e pague para confirmar
+                </p>
+                <div className="mt-3 flex items-center gap-2">
+                  <input
+                    readOnly
+                    value={novoPix.qrCodeText}
+                    className="min-w-0 flex-1 truncate rounded-lg border border-amber-200 bg-white px-3 py-2 text-xs text-sand-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => navigator.clipboard.writeText(novoPix.qrCodeText || "")}
+                    className="rounded-lg bg-[#8b5e3c] px-3 py-2 text-xs font-medium text-white hover:bg-[#704629]"
+                  >
+                    Copiar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <p className="text-xs text-sand-500">
+                  O sinal ainda não foi pago, então o horário não está confirmado.
+                </p>
+                <button
+                  type="button"
+                  onClick={gerarPix}
+                  disabled={gerando}
+                  className="mt-2 w-full rounded-lg bg-[#8b5e3c] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#704629] disabled:opacity-50"
+                >
+                  {gerando ? "Gerando Pix…" : "Pagar o sinal agora"}
+                </button>
+              </>
+            )}
+            {erroPix && <p className="mt-2 text-xs text-red-600">{erroPix}</p>}
+          </div>
         ) : appointment.paymentStatus === "paid" || appointment.payment?.status === "paid" ? (
           <p className="mt-2 text-xs text-emerald-700">Sinal pago. Seu horário está confirmado.</p>
         ) : (

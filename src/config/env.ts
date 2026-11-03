@@ -36,7 +36,18 @@ const schema = z.object({
   // O PagBank exige customer.tax_id no endpoint /orders.
   PAGBANK_CUSTOMER_TAX_ID: z.string().optional().default(''),
 
-  RESERVATION_MINUTES: z.coerce.number().default(5),
+  // Quanto tempo o horario fica reservado esperando o sinal. Precisa ser MAIOR
+  // que PAYMENT_REMINDER_MINUTES: a cobranca automatica leva um link de Pix que
+  // so funciona enquanto a reserva estiver de pe.
+  RESERVATION_MINUTES: z.coerce.number().default(30),
+
+  // Quando sai a cobranca automatica de quem agendou e nao pagou o sinal.
+  PAYMENT_REMINDER_MINUTES: z.coerce.number().default(15),
+
+  // Endereco do SITE (nao da API). E a base do link que vai na cobranca.
+  // Em producao a API e o site ficam no mesmo dominio, entao o padrao e o
+  // proprio PUBLIC_API_URL.
+  PUBLIC_WEB_URL: z.string().url().optional(),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -47,4 +58,15 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-export const env = parsed.data;
+export const env = {
+  ...parsed.data,
+  PUBLIC_WEB_URL: parsed.data.PUBLIC_WEB_URL ?? parsed.data.PUBLIC_API_URL,
+};
+
+if (env.RESERVATION_MINUTES <= env.PAYMENT_REMINDER_MINUTES) {
+  console.warn(
+    `[env] RESERVATION_MINUTES (${env.RESERVATION_MINUTES}) precisa ser maior que ` +
+      `PAYMENT_REMINDER_MINUTES (${env.PAYMENT_REMINDER_MINUTES}), senao a cobranca ` +
+      'automatica sai com um link de pagamento ja expirado.',
+  );
+}
