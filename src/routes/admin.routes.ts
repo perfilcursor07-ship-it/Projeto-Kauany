@@ -126,7 +126,10 @@ export async function adminRoutes(app: FastifyInstance) {
     weekEnd.setDate(weekEnd.getDate() + 6);
     weekEnd.setHours(23, 59, 59, 999);
 
-    const [todays, weekly] = await Promise.all([
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    const [todays, weekly, monthly] = await Promise.all([
       prisma.appointment.findMany({
         where: {
           businessId,
@@ -145,6 +148,19 @@ export async function adminRoutes(app: FastifyInstance) {
           businessId,
           startAt: { gte: weekStart, lte: weekEnd },
           status: { not: 'removed' },
+        },
+        include: {
+          service: { select: { name: true } },
+          appointmentServices: { include: { service: { select: { name: true } } } },
+          client: { select: { name: true, phone: true } },
+        },
+        orderBy: { startAt: 'asc' },
+      }),
+      prisma.appointment.findMany({
+        where: {
+          businessId,
+          startAt: { gte: monthStart, lte: monthEnd },
+          status: { notIn: ['removed', 'expired'] },
         },
         include: {
           service: { select: { name: true } },
@@ -186,6 +202,39 @@ export async function adminRoutes(app: FastifyInstance) {
       (a) => a.startAt >= now && a.status !== 'completed'
     ).length;
 
+    const dateKey = (date: Date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+        date.getDate()
+      ).padStart(2, '0')}`;
+
+    const receivedOf = (a: {
+      status: string;
+      paymentStatus: string;
+      totalAmount: Prisma.Decimal;
+      depositAmount: Prisma.Decimal;
+    }) => {
+      if (a.status === 'completed') return Number(a.totalAmount);
+      if (a.paymentStatus === 'paid') return Number(a.depositAmount);
+      return 0;
+    };
+
+    const monthDays = new Map<
+      string,
+      { date: string; count: number; pendingDeposit: number; expected: number }
+    >();
+    for (const a of monthly) {
+      const key = dateKey(a.startAt);
+      const day =
+        monthDays.get(key) ?? { date: key, count: 0, pendingDeposit: 0, expected: 0 };
+      day.count += 1;
+      day.expected += Number(a.totalAmount);
+      if (a.status === 'pending_payment' && a.paymentStatus !== 'paid') day.pendingDeposit += 1;
+      monthDays.set(key, day);
+    }
+
+    const monthExpected = monthly.reduce((sum, a) => sum + Number(a.totalAmount), 0);
+    const monthReceived = monthly.reduce((sum, a) => sum + receivedOf(a), 0);
+
     return {
       today: {
         count: todays.length,
@@ -208,6 +257,31 @@ export async function adminRoutes(app: FastifyInstance) {
         received: weeklyReceived,
         toReceive: Math.max(weeklyExpected - weeklyReceived, 0),
         appointments: weeklyActive.map((a) => ({
+          id: a.id,
+          time: a.startAt,
+          client: a.client.name,
+          phone: a.client.phone,
+          service: appointmentServiceLabel(a),
+          status: a.status,
+          paymentStatus: a.paymentStatus,
+          total: Number(a.totalAmount),
+          deposit: Number(a.depositAmount),
+        })),
+      },
+      month: {
+        key: dateKey(monthStart).slice(0, 7),
+        start: monthStart,
+        end: monthEnd,
+        count: monthly.length,
+        completed: monthly.filter((a) => a.status === 'completed').length,
+        pendingDeposit: monthly.filter(
+          (a) => a.status === 'pending_payment' && a.paymentStatus !== 'paid'
+        ).length,
+        expectedRevenue: monthExpected,
+        received: monthReceived,
+        toReceive: Math.max(monthExpected - monthReceived, 0),
+        days: [...monthDays.values()].sort((a, b) => a.date.localeCompare(b.date)),
+        appointments: monthly.map((a) => ({
           id: a.id,
           time: a.startAt,
           client: a.client.name,

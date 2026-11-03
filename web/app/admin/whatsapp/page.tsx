@@ -19,6 +19,7 @@ type Notification = {
   error: string | null;
   createdAt: string;
   sentAt: string | null;
+  appointment: { clientName: string; startAt: string; status: string } | null;
 };
 
 type NotificationsResponse = {
@@ -33,6 +34,7 @@ const TRIGGER_LABEL: Record<string, string> = {
   reminder_2h: "Lembrete do dia",
   cancelled: "Cancelamento",
   manager_paid: "Aviso interno",
+  address_update: "Correção de endereço",
 };
 
 // Monta o link wa.me com a mensagem pronta (normaliza o DDI 55).
@@ -46,6 +48,8 @@ export default function WhatsappPage() {
   const [st, setSt] = useState<Status>({ mode: "manual", status: "disconnected", phoneNumber: null, qr: null });
   const [data, setData] = useState<NotificationsResponse>({ mode: "manual", studioPhone: null, notifications: [] });
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [resendingId, setResendingId] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -98,6 +102,23 @@ export default function WhatsappPage() {
     }
   }
 
+  async function resendAddress(id: string) {
+    setError(null);
+    setNotice(null);
+    setResendingId(id);
+    try {
+      await api(`/api/admin/whatsapp/notifications/${id}/resend-address`, { method: "POST", auth: true });
+      setNotice(manual
+        ? "Correção adicionada às mensagens para enviar."
+        : "Correção adicionada à fila do WhatsApp.");
+      await loadData();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setResendingId(null);
+    }
+  }
+
   const manual = (st.mode ?? data.mode) === "manual";
   const notifications = Array.isArray(data.notifications) ? data.notifications : [];
   const pending = notifications.filter((n) => n.status === "pending");
@@ -120,6 +141,11 @@ export default function WhatsappPage() {
       {error && (
         <div className="rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+          {notice}
         </div>
       )}
 
@@ -190,14 +216,30 @@ export default function WhatsappPage() {
                 {history.slice(0, 15).map((n) => (
                   <div
                     key={n.id}
-                    className="flex items-center justify-between border-b border-sand-100 py-2 text-sm last:border-0"
+                    className="flex flex-wrap items-center justify-between gap-3 border-b border-sand-100 py-3 text-sm last:border-0"
                   >
-                    <span className="text-sand-600">
-                      {TRIGGER_LABEL[n.triggerKey] ?? n.triggerKey} · {n.toPhone}
-                    </span>
-                    <span className="text-xs text-sand-400">
-                      {n.status === "sent" ? "enviada" : "falhou"}
-                    </span>
+                    <div>
+                      <p className="text-sand-700">
+                        {TRIGGER_LABEL[n.triggerKey] ?? n.triggerKey} · {n.appointment?.clientName ?? n.toPhone}
+                      </p>
+                      <p className="text-xs text-sand-400">
+                        {n.toPhone} · {formatDateTime(n.appointment?.startAt ?? n.sentAt ?? n.createdAt)}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-sand-400">
+                        {n.status === "sent" ? "enviada" : "falhou"}
+                      </span>
+                      {n.triggerKey === "confirmed" && n.status === "sent" && n.appointment?.status === "confirmed" && (
+                        <button
+                          onClick={() => resendAddress(n.id)}
+                          disabled={resendingId === n.id}
+                          className="rounded-lg border border-accent-200 bg-accent-50 px-3 py-1.5 text-xs font-semibold text-accent-700 hover:bg-accent-100 disabled:opacity-50"
+                        >
+                          {resendingId === n.id ? "Adicionando…" : "Reenviar endereço"}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -207,7 +249,7 @@ export default function WhatsappPage() {
       ) : (
         <>
           <BaileysPanel st={st} onChanged={loadStatus} />
-          <Logs notifications={notifications} onRetry={retry} />
+          <Logs notifications={notifications} onRetry={retry} onResendAddress={resendAddress} resendingId={resendingId} />
         </>
       )}
     </div>
@@ -218,9 +260,13 @@ export default function WhatsappPage() {
 function Logs({
   notifications,
   onRetry,
+  onResendAddress,
+  resendingId,
 }: {
   notifications: Notification[];
   onRetry: (id: string) => void;
+  onResendAddress: (id: string) => Promise<void>;
+  resendingId: string | null;
 }) {
   const sent = notifications.filter((n) => n.status === "sent").length;
   const pending = notifications.filter((n) => n.status === "pending").length;
@@ -263,8 +309,10 @@ function Logs({
               <span className="font-medium text-sand-800">
                 {TRIGGER_LABEL[n.triggerKey] ?? n.triggerKey}
               </span>
-              <span className="text-sand-500">{n.toPhone}</span>
-              <div className="flex items-center gap-2">
+              <span className="text-sand-500">
+                {n.appointment?.clientName ? `${n.appointment.clientName} · ` : ""}{n.toPhone}
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
                 <StatusBadge status={n.status} />
                 {n.status === "failed" && (
                   <button
@@ -272,6 +320,15 @@ function Logs({
                     className="text-xs font-semibold text-accent-700 hover:underline"
                   >
                     Reenviar
+                  </button>
+                )}
+                {n.triggerKey === "confirmed" && n.status === "sent" && n.appointment?.status === "confirmed" && (
+                  <button
+                    onClick={() => onResendAddress(n.id)}
+                    disabled={resendingId === n.id}
+                    className="text-xs font-semibold text-accent-700 hover:underline disabled:opacity-50"
+                  >
+                    {resendingId === n.id ? "Adicionando…" : "Reenviar endereço"}
                   </button>
                 )}
               </div>

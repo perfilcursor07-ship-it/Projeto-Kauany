@@ -64,8 +64,8 @@ async function runOnce() {
       return;
     }
 
-    // Lembrete de agendamento que nao esta mais confirmado: nao envia.
-    if (job.appointmentId && job.triggerKey.startsWith('reminder')) {
+    // Lembrete ou correcao de endereco de agendamento nao confirmado: nao envia.
+    if (job.appointmentId && (job.triggerKey.startsWith('reminder') || job.triggerKey === 'address_update')) {
       const appt = await prisma.appointment.findUnique({
         where: { id: job.appointmentId },
         select: { status: true },

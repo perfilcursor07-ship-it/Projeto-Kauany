@@ -12,7 +12,7 @@ import {
   appointmentServiceLabel,
   expireAppointmentIfNeeded,
 } from '../appointments/appointments.service.js';
-import { renderTemplate } from '../whatsapp/templates.js';
+import { renderTemplate, STUDIO_ADDRESS_URL } from '../whatsapp/templates.js';
 import QRCode from 'qrcode';
 
 // Modo de teste: sem PagBank real. Ativado por PAYMENTS_MODE=fake ou quando
@@ -294,7 +294,7 @@ async function applyPaidPayment(
       sinal: brl(deposit),
       restante: brl(total - deposit),
       studio: business?.name ?? '',
-      endereco: 'https://maps.app.goo.gl/akCuRvFd1vHnUfsZ8?g_st=ic',
+      endereco: STUDIO_ADDRESS_URL,
       localizacao: 'https://maps.app.goo.gl/kW2nQ23ksDJDFPBG8?g_st=ic',
     };
 
