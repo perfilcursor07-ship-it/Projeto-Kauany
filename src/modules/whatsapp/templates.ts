@@ -1,5 +1,7 @@
+// Link unico do studio no mapa. {endereco} e {localizacao} apontam para o
+// mesmo lugar, entao trocar a linha abaixo atualiza TODAS as mensagens.
 export const STUDIO_ADDRESS_URL = 'https://maps.app.goo.gl/WmtcSPEgADHH12rR6';
-export const STUDIO_LOCATION_URL = 'https://maps.app.goo.gl/kW2nQ23ksDJDFPBG8?g_st=ic';
+export const STUDIO_LOCATION_URL = STUDIO_ADDRESS_URL;
 
 // Substitui placeholders {chave} pelas variaveis fornecidas.
 export function renderTemplate(body: string, vars: Record<string, string>): string {

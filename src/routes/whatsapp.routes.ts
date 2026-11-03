@@ -121,6 +121,9 @@ export async function whatsappRoutes(app: FastifyInstance) {
           error: true,
           createdAt: true,
           sentAt: true,
+          providerMessageId: true,
+          deliveredAt: true,
+          readAt: true,
         },
       }),
     ]);
@@ -163,9 +166,12 @@ export async function whatsappRoutes(app: FastifyInstance) {
       notifyPhone,
       connectedPhone,
       notifySelfSend: isSamePhone(notifyTarget, connectedPhone),
-      notifications: notifications.map(({ id, appointmentId, ...item }) => ({
+      notifications: notifications.map(({ id, appointmentId, providerMessageId, ...item }) => ({
         ...item,
         id: id.toString(),
+        // Mensagens enviadas antes do rastreamento nao tem id, entao nao da
+        // para afirmar nada sobre a entrega delas.
+        tracked: providerMessageId !== null,
         appointment: appointmentId ? appointmentById.get(appointmentId.toString()) ?? null : null,
       })),
     };

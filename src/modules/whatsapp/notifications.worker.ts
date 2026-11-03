@@ -91,7 +91,13 @@ async function runOnce() {
     if (result.ok) {
       await prisma.notificationJob.update({
         where: { id: job.id },
-        data: { status: 'sent', sentAt: new Date(), error: null },
+        data: {
+          status: 'sent',
+          sentAt: new Date(),
+          error: null,
+          // Guarda o id para casar o ACK de entrega que chega depois.
+          providerMessageId: result.messageId ?? null,
+        },
       });
     } else {
       await prisma.notificationJob.update({

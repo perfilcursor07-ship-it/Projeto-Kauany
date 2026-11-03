@@ -97,6 +97,17 @@ export async function connectWhatsapp(businessId: bigint): Promise<ConnStatus> {
 
   sock.ev.on('creds.update', saveCreds);
 
+  // ACKs do WhatsApp. 'sent' so diz que o socket aceitou a mensagem; estes
+  // eventos sao a unica prova de que ela chegou (DELIVERY_ACK) ou foi lida
+  // (READ) no aparelho da cliente. Sem isso o painel mostra verde para
+  // mensagens que o WhatsApp descartou do lado dele.
+  sock.ev.on('messages.update', (updates) => {
+    for (const { key, update } of updates) {
+      if (!key.fromMe || !key.id || update.status === undefined || update.status === null) continue;
+      void recordAck(businessId, key.id, update.status).catch(() => {});
+    }
+  });
+
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -178,6 +189,31 @@ export function isConnected(businessId: bigint): boolean {
   return getState(businessId).status === 'connected';
 }
 
+// proto.WebMessageInfo.Status: 2 = SERVER_ACK, 3 = DELIVERY_ACK, 4 = READ.
+const DELIVERY_ACK = 3;
+const READ_ACK = 4;
+
+async function recordAck(businessId: bigint, messageId: string, status: number): Promise<void> {
+  if (status < DELIVERY_ACK) return; // SERVER_ACK nao prova entrega
+
+  const now = new Date();
+
+  // Os ACKs chegam repetidos e fora de ordem. Gravar so quando o campo ainda
+  // esta vazio mantem o horario real do primeiro ACK -- caso contrario um ACK
+  // de leitura sobrescreveria a hora da entrega.
+  await prisma.notificationJob.updateMany({
+    where: { businessId, providerMessageId: messageId, deliveredAt: null },
+    data: { deliveredAt: now },
+  });
+
+  if (status >= READ_ACK) {
+    await prisma.notificationJob.updateMany({
+      where: { businessId, providerMessageId: messageId, readAt: null },
+      data: { readAt: now },
+    });
+  }
+}
+
 // Normaliza um telefone BR para JID e confirma se existe no WhatsApp.
 async function resolveJid(sock: WASocket, phone: string): Promise<string | null> {
   let digits = phone.replace(/\D/g, '');
@@ -223,7 +259,7 @@ export async function sendText(
   businessId: bigint,
   phone: string,
   text: string,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; messageId?: string }> {
   const state = getState(businessId);
   if (state.status !== 'connected' || !state.sock) {
     return { ok: false, error: 'WhatsApp desconectado' };
@@ -252,8 +288,9 @@ export async function sendText(
     // Tempo de "digitacao" proporcional ao tamanho da mensagem.
     await delay(Math.min(6000, 800 + text.length * rand(20, 45)));
     await sock.sendPresenceUpdate('paused', jid);
-    await sock.sendMessage(jid, { text });
-    return { ok: true };
+    const sent = await sock.sendMessage(jid, { text });
+    // O id e a chave para casar os ACKs que chegam depois.
+    return { ok: true, messageId: sent?.key?.id ?? undefined };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

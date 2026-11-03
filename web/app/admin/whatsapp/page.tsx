@@ -19,6 +19,10 @@ type Notification = {
   error: string | null;
   createdAt: string;
   sentAt: string | null;
+  // Confirmacao real de entrega. sentAt so diz que o WhatsApp aceitou.
+  tracked: boolean;
+  deliveredAt: string | null;
+  readAt: string | null;
   appointment: { clientName: string; startAt: string; status: string } | null;
 };
 
@@ -601,15 +605,35 @@ function Logs({
   const sent = notifications.filter((n) => n.status === "sent").length;
   const pending = notifications.filter((n) => n.status === "pending").length;
   const failed = notifications.filter((n) => n.status === "failed").length;
+  // So conta como entregue quem recebeu ACK do aparelho.
+  const delivered = notifications.filter((n) => n.deliveredAt).length;
+  // Aceitas pelo WhatsApp, rastreadas, mas sem ACK de entrega ate agora.
+  const unconfirmed = notifications.filter(
+    (n) => n.status === "sent" && n.tracked && !n.deliveredAt,
+  ).length;
 
   return (
     <section className="rounded-lg border border-accent-100 bg-white p-5 shadow-sm shadow-accent-100/40">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="font-display text-lg text-sand-900">Logs de envio</h2>
+        <div>
+          <h2 className="font-display text-lg text-sand-900">Logs de envio</h2>
+          <p className="mt-0.5 text-xs text-sand-400">
+            <strong>Aceita</strong> = o WhatsApp recebeu o envio. <strong>Entregue</strong> = chegou
+            no aparelho da cliente.
+          </p>
+        </div>
         <div className="flex gap-2 text-xs">
           <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700">
-            {sent} enviadas
+            {delivered} entregues
           </span>
+          <span className="rounded-full border border-sand-200 bg-sand-50 px-2.5 py-1 font-semibold text-sand-600">
+            {sent} aceitas
+          </span>
+          {unconfirmed > 0 && (
+            <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 font-semibold text-amber-700">
+              {unconfirmed} sem confirmação
+            </span>
+          )}
           <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 font-semibold text-amber-700">
             {pending} na fila
           </span>
@@ -644,6 +668,7 @@ function Logs({
               </span>
               <div className="flex flex-wrap items-center gap-2">
                 <StatusBadge status={n.status} />
+                <DeliveryBadge n={n} />
                 {n.status === "failed" && (
                   <button
                     onClick={() => onRetry(n.id)}
@@ -676,9 +701,55 @@ function Logs({
   );
 }
 
+// Entrega real, a partir dos ACKs do WhatsApp. Uma mensagem "Enviada" sem
+// ACK de entrega e exatamente o caso em que o WhatsApp aceitou o envio mas
+// descartou a mensagem -- o painel precisa mostrar isso, nao esconder.
+function DeliveryBadge({ n }: { n: Notification }) {
+  if (n.status !== "sent") return null;
+
+  if (n.readAt) {
+    return (
+      <span
+        title={`Lida em ${formatDateTime(n.readAt)}`}
+        className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700"
+      >
+        Lida
+      </span>
+    );
+  }
+  if (n.deliveredAt) {
+    return (
+      <span
+        title={`Entregue em ${formatDateTime(n.deliveredAt)}`}
+        className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700"
+      >
+        Entregue
+      </span>
+    );
+  }
+  if (!n.tracked) {
+    return (
+      <span
+        title="Enviada antes do registro de entrega: não dá para saber se chegou."
+        className="inline-flex rounded-full border border-sand-200 bg-sand-50 px-2.5 py-0.5 text-xs font-medium text-sand-400"
+      >
+        Sem registro
+      </span>
+    );
+  }
+  return (
+    <span
+      title="O WhatsApp aceitou o envio, mas o aparelho ainda não confirmou o recebimento. Se continuar assim, a mensagem não chegou."
+      className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700"
+    >
+      Sem confirmação
+    </span>
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { label: string; cls: string }> = {
-    sent: { label: "Enviada", cls: "border-emerald-200 bg-emerald-50 text-emerald-700" },
+    sent: { label: "Aceita", cls: "border-sand-200 bg-sand-50 text-sand-600" },
     pending: { label: "Na fila", cls: "border-amber-200 bg-amber-50 text-amber-700" },
     failed: { label: "Falhou", cls: "border-red-200 bg-red-50 text-red-600" },
     cancelled: { label: "Cancelada", cls: "border-sand-200 bg-sand-50 text-sand-500" },

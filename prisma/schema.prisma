@@ -361,11 +361,17 @@ model NotificationJob {
   scheduledFor  DateTime  @map("scheduled_for") @db.DateTime(0)
   status        String    @default("pending")
   sentAt        DateTime? @map("sent_at") @db.DateTime(0)
+  // Confirmacao real de entrega (ACK do WhatsApp). sentAt diz apenas que o
+  // socket aceitou; deliveredAt e que prova que chegou no aparelho.
+  providerMessageId String? @map("provider_message_id") @db.VarChar(120)
+  deliveredAt   DateTime? @map("delivered_at") @db.DateTime(0)
+  readAt        DateTime? @map("read_at") @db.DateTime(0)
   error         String?   @db.Text
   createdAt     DateTime  @default(now()) @map("created_at") @db.DateTime(0)
   updatedAt     DateTime  @updatedAt @map("updated_at") @db.DateTime(0)
 
   @@index([status, scheduledFor])
   @@index([appointmentId])
+  @@index([providerMessageId])
   @@map("notification_jobs")
 }
