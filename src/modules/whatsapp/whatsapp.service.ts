@@ -1,6 +1,7 @@
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
+  generateMessageIDV2,
   Browsers,
   type WASocket,
 } from '@whiskeysockets/baileys';
@@ -115,6 +116,35 @@ export async function connectWhatsapp(businessId: bigint): Promise<ConnStatus> {
     }
   });
 
+  // ACK do servidor do WhatsApp.
+  //
+  // O Baileys so transforma em evento os recibos de ENTREGA e LEITURA. O ACK
+  // do servidor chega como um no cru <ack class="message"> e o handleBadAck
+  // dele so emite alguma coisa quando vem com erro -- um ACK de sucesso e
+  // descartado em silencio. Por isso escutamos o no direto: e a unica forma de
+  // separar "o WhatsApp aceitou e descartou" de "nem o servidor respondeu".
+  //
+  // Quando vem com erro, o atributo diz o motivo da recusa. Isso vira falha
+  // visivel no painel em vez de um envio verde que nunca chegou.
+  sock.ws.on('CB:ack,class:message', (node: { attrs?: Record<string, string> }) => {
+    const id = node?.attrs?.id;
+    if (!id) return;
+
+    const error = node?.attrs?.error;
+    if (error) {
+      console.error(`[whatsapp] servidor RECUSOU msg=${id} erro=${error}`);
+      void failByAck(businessId, id, `WhatsApp recusou o envio (erro ${error})`).catch((err) => {
+        console.error('[whatsapp] falha ao gravar recusa', id, err);
+      });
+      return;
+    }
+
+    console.log(`[whatsapp] ACK servidor msg=${id}`);
+    void recordServerAck(businessId, id).catch((err) => {
+      console.error('[whatsapp] falha ao gravar ACK do servidor', id, err);
+    });
+  });
+
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -196,8 +226,9 @@ export function isConnected(businessId: bigint): boolean {
   return getState(businessId).status === 'connected';
 }
 
-// proto.WebMessageInfo.Status: 2 = SERVER_ACK, 3 = DELIVERY_ACK, 4 = READ.
-const SERVER_ACK = 2;
+// proto.WebMessageInfo.Status: 3 = DELIVERY_ACK, 4 = READ.
+// SERVER_ACK (2) nao chega por aqui: o Baileys descarta o ACK de sucesso do
+// servidor, entao ele e capturado direto do no CB:ack,class:message.
 const DELIVERY_ACK = 3;
 const READ_ACK = 4;
 
@@ -208,27 +239,32 @@ const ACK_LABEL: Record<number, string> = {
   5: 'ouvida',
 };
 
+// Grava so quando o campo ainda esta vazio: os ACKs chegam repetidos e fora de
+// ordem, e um ACK de leitura nao pode sobrescrever a hora real da entrega.
+async function recordServerAck(businessId: bigint, messageId: string): Promise<void> {
+  await prisma.notificationJob.updateMany({
+    where: { businessId, providerMessageId: messageId, serverAckAt: null },
+    data: { serverAckAt: new Date() },
+  });
+}
+
+async function failByAck(businessId: bigint, messageId: string, reason: string): Promise<void> {
+  await prisma.notificationJob.updateMany({
+    where: { businessId, providerMessageId: messageId, deliveredAt: null },
+    data: { status: 'failed', error: reason },
+  });
+}
+
 async function recordAck(businessId: bigint, messageId: string, status: number): Promise<void> {
-  if (status < SERVER_ACK) return;
+  if (status < DELIVERY_ACK) return; // entrega e leitura so; o resto vem do CB:ack
 
   const now = new Date();
 
-  // Os ACKs chegam repetidos e fora de ordem. Gravar so quando o campo ainda
-  // esta vazio mantem o horario real do primeiro ACK -- caso contrario um ACK
-  // de leitura sobrescreveria a hora da entrega.
-  //
   // Um ACK mais alto implica os anteriores: quem leu, recebeu.
   const touched = await prisma.notificationJob.updateMany({
-    where: { businessId, providerMessageId: messageId, serverAckAt: null },
-    data: { serverAckAt: now },
+    where: { businessId, providerMessageId: messageId, deliveredAt: null },
+    data: { deliveredAt: now },
   });
-
-  if (status >= DELIVERY_ACK) {
-    await prisma.notificationJob.updateMany({
-      where: { businessId, providerMessageId: messageId, deliveredAt: null },
-      data: { deliveredAt: now },
-    });
-  }
 
   if (status >= READ_ACK) {
     await prisma.notificationJob.updateMany({
@@ -237,7 +273,7 @@ async function recordAck(businessId: bigint, messageId: string, status: number):
     });
   }
 
-  // Log visivel no pm2: prova que os ACKs estao chegando e qual nivel pararam.
+  // Log visivel no pm2: prova que os ACKs estao chegando e onde pararam.
   console.log(
     `[whatsapp] ACK ${ACK_LABEL[status] ?? status} msg=${messageId} ` +
       `(${touched.count > 0 ? 'primeira vez' : 'repetido'})`,
@@ -284,11 +320,22 @@ export function getConnectedPhone(businessId: bigint): string | null {
   return state.status === 'connected' ? state.phoneNumber : null;
 }
 
+// Id da mensagem gerado ANTES do envio.
+//
+// O ACK do servidor volta em milissegundos. Se o id so fosse gravado depois que
+// o sendMessage resolve, o ACK chegaria antes da linha ter o id, nao casaria
+// com nada e se perderia para sempre. Gerando aqui, a fila grava o id primeiro
+// e depois envia.
+export function newMessageId(businessId: bigint): string {
+  return generateMessageIDV2(getState(businessId).sock?.user?.id);
+}
+
 // Envio humanizado: presenca "digitando" + pausas aleatorias (anti-bloqueio).
 export async function sendText(
   businessId: bigint,
   phone: string,
   text: string,
+  messageId?: string,
 ): Promise<{ ok: boolean; error?: string; messageId?: string }> {
   const state = getState(businessId);
   if (state.status !== 'connected' || !state.sock) {
@@ -318,9 +365,9 @@ export async function sendText(
     // Tempo de "digitacao" proporcional ao tamanho da mensagem.
     await delay(Math.min(6000, 800 + text.length * rand(20, 45)));
     await sock.sendPresenceUpdate('paused', jid);
-    const sent = await sock.sendMessage(jid, { text });
-    // O id e a chave para casar os ACKs que chegam depois.
-    return { ok: true, messageId: sent?.key?.id ?? undefined };
+    // messageId fixo: a fila ja gravou esse id, entao todo ACK casa.
+    const sent = await sock.sendMessage(jid, { text }, messageId ? { messageId } : {});
+    return { ok: true, messageId: sent?.key?.id ?? messageId };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

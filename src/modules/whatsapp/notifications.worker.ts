@@ -1,6 +1,6 @@
 import { prisma } from '../../lib/prisma.js';
 import { env } from '../../config/env.js';
-import { isConnected, sendText } from './whatsapp.service.js';
+import { isConnected, newMessageId, sendText } from './whatsapp.service.js';
 
 // ===========================================================================
 // Worker do robo (modo baileys). Envia as mensagens da fila notification_jobs
@@ -87,24 +87,26 @@ async function runOnce() {
       return;
     }
 
-    const result = await sendText(job.businessId, job.toPhone, job.body);
-    if (result.ok) {
-      await prisma.notificationJob.update({
-        where: { id: job.id },
-        data: {
-          status: 'sent',
-          sentAt: new Date(),
-          error: null,
-          // Guarda o id para casar o ACK de entrega que chega depois.
-          providerMessageId: result.messageId ?? null,
-        },
-      });
-    } else {
-      await prisma.notificationJob.update({
-        where: { id: job.id },
-        data: { status: 'failed', error: result.error ?? 'erro desconhecido' },
-      });
-    }
+    // Grava o id ANTES de enviar. O ACK do servidor volta em milissegundos e,
+    // se a linha ainda nao tivesse o id, o ACK nao casaria com nada.
+    const messageId = newMessageId(job.businessId);
+    await prisma.notificationJob.update({
+      where: { id: job.id },
+      data: { providerMessageId: messageId },
+    });
+
+    const result = await sendText(job.businessId, job.toPhone, job.body, messageId);
+
+    // updateMany com filtro de status em vez de update: o ACK de recusa do
+    // servidor pode chegar enquanto o sendText ainda nao retornou e ja marcar
+    // a linha como 'failed'. Sem o filtro, o worker apagaria essa falha logo
+    // em seguida escrevendo 'sent' por cima.
+    await prisma.notificationJob.updateMany({
+      where: { id: job.id, status: 'pending' },
+      data: result.ok
+        ? { status: 'sent', sentAt: new Date(), error: null }
+        : { status: 'failed', error: result.error ?? 'erro desconhecido' },
+    });
 
     // Intervalo ALEATORIO ate a proxima mensagem (essencial anti-bloqueio).
     scheduleNext(rand(env.WHATSAPP_MIN_GAP_SEC, env.WHATSAPP_MAX_GAP_SEC));
