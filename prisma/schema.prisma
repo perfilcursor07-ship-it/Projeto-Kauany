@@ -22,6 +22,10 @@ model Business {
   // numero DIFERENTE do conectado ao robo: o WhatsApp nao notifica mensagens
   // que voce envia para voce mesma.
   notifyPhone String? @map("notify_phone") @db.VarChar(30)
+  // Push dos avisos internos (ntfy). O topico e o "canal": quem souber o nome
+  // le as mensagens, por isso o painel gera um valor longo e aleatorio.
+  ntfyServer String? @map("ntfy_server") @db.VarChar(200)
+  ntfyTopic  String? @map("ntfy_topic") @db.VarChar(120)
   timezone  String   @default("America/Sao_Paulo") @db.VarChar(60)
   active    Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)

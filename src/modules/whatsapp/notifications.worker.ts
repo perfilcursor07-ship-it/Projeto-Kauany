@@ -1,6 +1,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { env } from '../../config/env.js';
-import { isConnected, newMessageId, sendText } from './whatsapp.service.js';
+import { isConnected, newMessageId, REJECTED_PREFIX, sendText } from './whatsapp.service.js';
+import { sendNtfy } from '../notifications/ntfy.service.js';
 
 // ===========================================================================
 // Worker do robo (modo baileys). Envia as mensagens da fila notification_jobs
@@ -14,6 +15,42 @@ import { isConnected, newMessageId, sendText } from './whatsapp.service.js';
 
 let timer: NodeJS.Timeout | null = null;
 let stopped = true;
+
+// Quanto tempo a fila fica parada depois de uma recusa do servidor do WhatsApp.
+//
+// O erro 463 (NackCallerReachoutTimelocked) e um bloqueio temporario por
+// "reachout": o WhatsApp limita quem manda mensagem para quem nunca falou com
+// o numero. Insistir enquanto o bloqueio esta ativo aprofunda a restricao e,
+// nos relatos do projeto Baileys, chega a derrubar a conta de vez. Entao, na
+// primeira recusa, a fila para sozinha em vez de continuar martelando.
+const BREAKER_COOLDOWN_MIN = 60;
+
+// Recusa mais recente do servidor para este negocio, se ainda estiver na
+// janela de bloqueio.
+//
+// Consulta crua de proposito: as colunas DATETIME guardam hora LOCAL, mas o
+// Prisma devolve e envia Date como se fosse UTC. Comparar `updatedAt` com um
+// `new Date()` do Node erra por 3 horas e o bloqueio nunca pegaria. Fazendo a
+// conta de tempo dentro do MySQL (TIMESTAMPDIFF com NOW()), os dois lados
+// usam o mesmo relogio.
+export async function recentRejection(
+  businessId: bigint,
+): Promise<{ error: string; minutesAgo: number } | null> {
+  const rows = await prisma.$queryRaw<Array<{ error: string; minutes_ago: unknown }>>`
+    SELECT error, TIMESTAMPDIFF(MINUTE, updated_at, NOW()) AS minutes_ago
+      FROM notification_jobs
+     WHERE business_id = ${businessId}
+       AND status = 'failed'
+       AND error LIKE ${REJECTED_PREFIX + '%'}
+       AND TIMESTAMPDIFF(MINUTE, updated_at, NOW()) BETWEEN 0 AND ${BREAKER_COOLDOWN_MIN}
+     ORDER BY updated_at DESC
+     LIMIT 1
+  `;
+
+  const row = rows[0];
+  if (!row) return null;
+  return { error: row.error, minutesAgo: Number(row.minutes_ago) };
+}
 
 const rand = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -37,9 +74,55 @@ function scheduleNext(seconds: number) {
   timer = setTimeout(() => void runOnce(), seconds * 1000);
 }
 
+// Avisos internos por push. Sai na frente da fila do WhatsApp e sem as pausas
+// dela: ntfy e um POST HTTP simples, nao tem risco de bloqueio, e um sinal
+// recebido precisa chegar na hora -- nao daqui a um minuto.
+async function drainNtfy(): Promise<boolean> {
+  const job = await prisma.notificationJob.findFirst({
+    where: { status: 'pending', channel: 'ntfy', scheduledFor: { lte: new Date() } },
+    orderBy: { scheduledFor: 'asc' },
+  });
+  if (!job) return false;
+
+  const business = await prisma.business.findUnique({
+    where: { id: job.businessId },
+    select: { ntfyServer: true, name: true },
+  });
+
+  const result = await sendNtfy(business?.ntfyServer, job.toPhone, {
+    title: `${business?.name ?? 'Studio'}: sinal recebido`,
+    body: job.body,
+    priority: 4,
+    tags: ['moneybag'],
+  });
+
+  await prisma.notificationJob.update({
+    where: { id: job.id },
+    data: result.ok
+      ? { status: 'sent', sentAt: new Date(), error: null }
+      : { status: 'failed', error: result.error ?? 'erro desconhecido no ntfy' },
+  });
+
+  if (!result.ok) console.error(`[ntfy] falha ao enviar aviso interno: ${result.error}`);
+  return true;
+}
+
 async function runOnce() {
   if (stopped) return;
   try {
+    // Push interno primeiro: nao depende do WhatsApp estar conectado, nem da
+    // janela de horario -- um pagamento as 23h tem que avisar as 23h.
+    if (await drainNtfy()) {
+      scheduleNext(2);
+      return;
+    }
+
+    // Daqui para baixo e so WhatsApp.
+    if (env.WHATSAPP_MODE !== 'baileys') {
+      scheduleNext(30);
+      return;
+    }
+
     // Fora da janela de horario: espera e checa de novo em 5 min.
     if (!withinSendWindow()) {
       scheduleNext(300);
@@ -61,6 +144,17 @@ async function runOnce() {
     // WhatsApp desconectado: deixa pendente e tenta de novo em 30s.
     if (!isConnected(job.businessId)) {
       scheduleNext(30);
+      return;
+    }
+
+    // Servidor recusou um envio ha pouco: segura a fila inteira. Os jobs ficam
+    // pendentes e saem sozinhos quando o bloqueio passar.
+    const rejection = await recentRejection(job.businessId);
+    if (rejection) {
+      console.warn(
+        `[whatsapp] fila pausada: ${rejection.error} (ha ${rejection.minutesAgo} min)`,
+      );
+      scheduleNext(300);
       return;
     }
 
@@ -117,8 +211,8 @@ async function runOnce() {
 }
 
 export function startNotificationWorker() {
-  // So roda no modo automatico. No manual as mensagens ficam para envio wa.me.
-  if (env.WHATSAPP_MODE !== 'baileys') return;
+  // Roda nos dois modos: no manual as mensagens da cliente ficam para envio
+  // wa.me, mas os avisos internos por ntfy continuam saindo sozinhos.
   if (!stopped) return;
   stopped = false;
   scheduleNext(10);

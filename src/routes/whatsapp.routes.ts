@@ -9,6 +9,14 @@ import {
   sendText,
 } from '../modules/whatsapp/whatsapp.service.js';
 import { prisma } from '../lib/prisma.js';
+import { recentRejection } from '../modules/whatsapp/notifications.worker.js';
+import {
+  DEFAULT_NTFY_SERVER,
+  isValidTopic,
+  normalizeServer,
+  sendNtfy,
+  suggestTopic,
+} from '../modules/notifications/ntfy.service.js';
 import {
   FALLBACK_BODIES,
   fallbackBody,
@@ -105,7 +113,7 @@ export async function whatsappRoutes(app: FastifyInstance) {
     const [business, notifications] = await Promise.all([
       prisma.business.findUnique({
         where: { id: businessId },
-        select: { phone: true, notifyPhone: true },
+        select: { phone: true, notifyPhone: true, ntfyServer: true, ntfyTopic: true },
       }),
       prisma.notificationJob.findMany({
         where: { businessId, channel: 'whatsapp' },
@@ -154,6 +162,10 @@ export async function whatsappRoutes(app: FastifyInstance) {
       ] as const),
     );
 
+    // Recusa recente do servidor: a fila esta pausada e o painel precisa dizer
+    // o motivo, em vez de deixar a gestora reenviando no vazio.
+    const rejection = await recentRejection(businessId);
+
     // O aviso interno nao chega quando o destino e a propria conta conectada:
     // o WhatsApp nao notifica mensagens que voce manda para voce mesmo. O
     // painel precisa dessa informacao para avisar antes de o envio falhar.
@@ -167,6 +179,12 @@ export async function whatsappRoutes(app: FastifyInstance) {
       notifyPhone,
       connectedPhone,
       notifySelfSend: isSamePhone(notifyTarget, connectedPhone),
+      rejection,
+      ntfy: {
+        server: normalizeServer(business?.ntfyServer),
+        topic: business?.ntfyTopic ?? null,
+        defaultServer: DEFAULT_NTFY_SERVER,
+      },
       notifications: notifications.map(({ id, appointmentId, providerMessageId, ...item }) => ({
         ...item,
         id: id.toString(),
@@ -176,6 +194,69 @@ export async function whatsappRoutes(app: FastifyInstance) {
         appointment: appointmentId ? appointmentById.get(appointmentId.toString()) ?? null : null,
       })),
     };
+  });
+
+  // ---------------------------------------------------------------- ntfy
+  // Avisos internos (sinal recebido) saem por push do ntfy, nao por WhatsApp:
+  // o destino e o proprio studio e o WhatsApp nao notifica voce sobre as suas
+  // proprias mensagens.
+
+  // Sugere um topico novo, longo e aleatorio.
+  app.get('/ntfy/suggest-topic', async () => ({ topic: suggestTopic() }));
+
+  app.put('/ntfy', async (req, reply) => {
+    const parsed = z
+      .object({
+        topic: z.string().max(120).nullable(),
+        server: z.string().max(200).nullable().optional(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ message: 'Dados invalidos' });
+
+    const topic = parsed.data.topic?.trim() || null;
+    if (topic && !isValidTopic(topic)) {
+      return reply.code(400).send({
+        message: 'O topico precisa ter de 8 a 64 caracteres, usando apenas letras, numeros, - e _',
+      });
+    }
+
+    const updated = await prisma.business.update({
+      where: { id: businessIdOf(req) },
+      data: {
+        ntfyTopic: topic,
+        ...(parsed.data.server !== undefined
+          ? { ntfyServer: parsed.data.server?.trim() || null }
+          : {}),
+      },
+      select: { ntfyTopic: true, ntfyServer: true },
+    });
+
+    return {
+      topic: updated.ntfyTopic,
+      server: normalizeServer(updated.ntfyServer),
+    };
+  });
+
+  // Dispara um push de teste no topico configurado.
+  app.post('/ntfy/test', async (req, reply) => {
+    const business = await prisma.business.findUnique({
+      where: { id: businessIdOf(req) },
+      select: { name: true, ntfyServer: true, ntfyTopic: true },
+    });
+    if (!business?.ntfyTopic) {
+      return reply.code(400).send({ message: 'Configure o topico do ntfy antes de testar' });
+    }
+
+    const result = await sendNtfy(business.ntfyServer, business.ntfyTopic, {
+      title: `${business.name}: teste`,
+      body:
+        'Push de teste do painel. Se chegou aqui, os avisos de sinal recebido ' +
+        'vao chegar do mesmo jeito.',
+      priority: 4,
+      tags: ['white_check_mark'],
+    });
+    if (!result.ok) return reply.code(400).send({ message: result.error });
+    return { sent: true };
   });
 
   // Numero que recebe os avisos internos (ex: "sinal recebido").

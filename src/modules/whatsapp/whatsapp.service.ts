@@ -133,7 +133,7 @@ export async function connectWhatsapp(businessId: bigint): Promise<ConnStatus> {
     const error = node?.attrs?.error;
     if (error) {
       console.error(`[whatsapp] servidor RECUSOU msg=${id} erro=${error}`);
-      void failByAck(businessId, id, `WhatsApp recusou o envio (erro ${error})`).catch((err) => {
+      void failByAck(businessId, id, `${REJECTED_PREFIX} (erro ${error})`).catch((err) => {
         console.error('[whatsapp] falha ao gravar recusa', id, err);
       });
       return;
@@ -231,6 +231,10 @@ export function isConnected(businessId: bigint): boolean {
 // servidor, entao ele e capturado direto do no CB:ack,class:message.
 const DELIVERY_ACK = 3;
 const READ_ACK = 4;
+
+// Prefixo fixo da mensagem de recusa. O worker procura por ele para saber que
+// precisa parar de enviar -- ver BREAKER em notifications.worker.ts.
+export const REJECTED_PREFIX = 'WhatsApp recusou o envio';
 
 const ACK_LABEL: Record<number, string> = {
   2: 'servidor',

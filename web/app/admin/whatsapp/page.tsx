@@ -45,6 +45,10 @@ type NotificationsResponse = {
   // true quando o aviso interno iria para a propria conta conectada: o
   // WhatsApp nao notifica mensagens que voce manda para voce mesmo.
   notifySelfSend: boolean;
+  // Recusa recente do servidor do WhatsApp: a fila fica pausada.
+  rejection: { error: string; minutesAgo: number } | null;
+  // Push dos avisos internos (sinal recebido).
+  ntfy: { server: string; topic: string | null; defaultServer: string };
   notifications: Notification[];
 };
 
@@ -56,18 +60,6 @@ const TRIGGER_LABEL: Record<string, string> = {
   manager_paid: "Aviso interno",
   address_update: "Correção de endereço",
 };
-
-// Exibe o numero no formato +55 (DD) 9XXXX-XXXX.
-function formatPhone(phone: string | null) {
-  const d = (phone ?? "").replace(/\D/g, "");
-  if (!d) return "";
-  const local = d.startsWith("55") ? d.slice(2) : d;
-  const ddd = local.slice(0, 2);
-  const rest = local.slice(2);
-  if (rest.length < 8) return `+${d}`;
-  const head = rest.slice(0, rest.length - 4);
-  return `+55 (${ddd}) ${head}-${rest.slice(-4)}`;
-}
 
 // Monta o link wa.me com a mensagem pronta (normaliza o DDI 55).
 function waLink(phone: string, body: string) {
@@ -84,6 +76,8 @@ export default function WhatsappPage() {
     notifyPhone: null,
     connectedPhone: null,
     notifySelfSend: false,
+    rejection: null,
+    ntfy: { server: "https://ntfy.sh", topic: null, defaultServer: "https://ntfy.sh" },
     notifications: [],
   });
   const [error, setError] = useState<string | null>(null);
@@ -188,6 +182,8 @@ export default function WhatsappPage() {
         </div>
       )}
 
+      {data.rejection && <RejectionBanner rejection={data.rejection} />}
+
       {manual ? (
         <>
           <div className="rounded-lg border border-accent-100 bg-accent-50 p-4 text-sm text-sand-700 shadow-sm shadow-accent-100/40">
@@ -198,6 +194,7 @@ export default function WhatsappPage() {
             </p>
           </div>
 
+          <NtfyCard data={data} onSaved={loadData} />
           <TestSendCard manual connected={false} />
 
           {/* Mensagens para enviar */}
@@ -290,11 +287,38 @@ export default function WhatsappPage() {
       ) : (
         <>
           <BaileysPanel st={st} onChanged={loadStatus} />
-          <NotifyPhoneCard data={data} onSaved={loadData} />
+          <NtfyCard data={data} onSaved={loadData} />
           <TestSendCard manual={false} connected={st.status === "connected"} />
           <Logs notifications={notifications} onRetry={retry} onResendAddress={resendAddress} resendingId={resendingId} />
         </>
       )}
+    </div>
+  );
+}
+
+// O servidor do WhatsApp recusou um envio. O erro 463 e um bloqueio temporario
+// por "reachout" -- insistir piora e pode derrubar a conta --, entao a fila se
+// pausa sozinha e o painel explica o que fazer em vez de convidar a reenviar.
+function RejectionBanner({ rejection }: { rejection: { error: string; minutesAgo: number } }) {
+  const is463 = rejection.error.includes("463");
+  return (
+    <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+      <p className="font-semibold">Envios pausados pelo WhatsApp</p>
+      <p className="mt-1">
+        {rejection.error}
+        {rejection.minutesAgo <= 1 ? ", agora há pouco." : `, há ${rejection.minutesAgo} minutos.`}
+      </p>
+      {is463 && (
+        <p className="mt-2">
+          O erro 463 é um bloqueio temporário: o WhatsApp limita números que mandam
+          mensagem para quem nunca falou com eles. A fila ficou parada de propósito —
+          insistir agora aprofunda o bloqueio e pode derrubar a conta de vez.
+        </p>
+      )}
+      <p className="mt-2">
+        As mensagens continuam na fila e saem sozinhas quando o bloqueio passar. Para
+        voltar a enviar agora, conecte um número que já tenha conversa com as clientes.
+      </p>
     </div>
   );
 }
@@ -480,39 +504,63 @@ function TestSendCard({ manual, connected }: { manual: boolean; connected: boole
   );
 }
 
-// Numero que recebe os avisos internos. Precisa ser DIFERENTE do numero
-// conectado ao robo: o WhatsApp nao notifica as suas proprias mensagens, elas
-// caem na conversa "Mensagem para você mesmo" sem nenhum aviso no aparelho.
-function NotifyPhoneCard({
+// Avisos internos por push (ntfy).
+//
+// O aviso de sinal recebido e o studio avisando a si mesmo, e o WhatsApp nao
+// notifica mensagem que voce manda para voce mesma. O ntfy resolve com push de
+// verdade e tem app de iPhone e Android.
+function NtfyCard({
   data,
   onSaved,
 }: {
   data: NotificationsResponse;
   onSaved: () => Promise<void> | void;
 }) {
-  const [value, setValue] = useState("");
+  const [topic, setTopic] = useState("");
+  const [server, setServer] = useState("");
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  // Enquanto o campo nao for editado, segue o valor que vem do servidor.
+  // Enquanto nao for editado, acompanha o que veio do servidor.
   useEffect(() => {
-    if (!touched) setValue(data.notifyPhone ?? "");
-  }, [data.notifyPhone, touched]);
+    if (!touched) {
+      setTopic(data.ntfy.topic ?? "");
+      setServer(data.ntfy.server === data.ntfy.defaultServer ? "" : data.ntfy.server);
+    }
+  }, [data.ntfy.topic, data.ntfy.server, data.ntfy.defaultServer, touched]);
 
-  async function save(next: string | null) {
+  async function gerar() {
+    setErr(null);
+    try {
+      const r = await api<{ topic: string }>("/api/admin/whatsapp/ntfy/suggest-topic", {
+        auth: true,
+      });
+      setTopic(r.topic);
+      setTouched(true);
+    } catch (e: any) {
+      setErr(e.message);
+    }
+  }
+
+  async function salvar(next: string | null) {
     setBusy(true);
     setMsg(null);
     setErr(null);
     try {
-      await api("/api/admin/whatsapp/notify-phone", {
+      await api("/api/admin/whatsapp/ntfy", {
         method: "PUT",
         auth: true,
-        body: JSON.stringify({ notifyPhone: next }),
+        body: JSON.stringify({ topic: next, server: server.trim() || null }),
       });
       setTouched(false);
-      setMsg(next ? "Número salvo. Os próximos avisos internos vão para ele." : "Número removido.");
+      setMsg(
+        next
+          ? "Tópico salvo. Agora abra o app ntfy e assine esse tópico."
+          : "Tópico removido. Os avisos internos voltam para o WhatsApp.",
+      );
       await onSaved();
     } catch (e: any) {
       setErr(e.message);
@@ -521,26 +569,30 @@ function NotifyPhoneCard({
     }
   }
 
+  async function testar() {
+    setTesting(true);
+    setMsg(null);
+    setErr(null);
+    try {
+      await api("/api/admin/whatsapp/ntfy/test", { method: "POST", auth: true });
+      setMsg("Push de teste enviado. Confira o app ntfy no celular.");
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  const salvo = data.ntfy.topic;
+
   return (
     <section className="rounded-lg border border-accent-100 bg-white p-5 shadow-sm shadow-accent-100/40">
-      <h2 className="font-display text-lg text-sand-900">Avisos internos</h2>
+      <h2 className="font-display text-lg text-sand-900">Avisos internos (push)</h2>
       <p className="mt-1 text-sm text-sand-500">
-        Número que recebe o aviso de <strong>sinal recebido</strong>. Precisa ser um número
-        diferente do que está conectado ao robô
-        {data.connectedPhone ? ` (${formatPhone(data.connectedPhone)})` : ""} — o WhatsApp não
-        notifica mensagens que você manda para você mesma.
+        O aviso de <strong>sinal recebido</strong> chega como notificação no seu celular, pelo
+        app ntfy. As mensagens das clientes — confirmação, lembretes, cancelamento e correção
+        de endereço — continuam saindo pelo WhatsApp.
       </p>
-
-      {data.notifySelfSend && (
-        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          <p className="font-semibold">O aviso interno não está chegando no celular.</p>
-          <p className="mt-1">
-            Hoje ele vai para o próprio número conectado, então cai na conversa
-            “Mensagem para você mesmo” e o WhatsApp não gera notificação. Cadastre outro
-            número abaixo (ex: seu WhatsApp pessoal).
-          </p>
-        </div>
-      )}
 
       {err && (
         <div className="mt-3 rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
@@ -553,40 +605,92 @@ function NotifyPhoneCard({
         </div>
       )}
 
+      <ol className="mt-4 space-y-1 rounded-lg bg-sand-50 px-4 py-3 text-sm text-sand-600">
+        <li>
+          1. Instale o app <strong>ntfy</strong> (
+          <a
+            href="https://apps.apple.com/br/app/ntfy/id1625396347"
+            target="_blank"
+            rel="noreferrer"
+            className="text-accent-700 underline"
+          >
+            iPhone
+          </a>{" "}
+          ou{" "}
+          <a
+            href="https://play.google.com/store/apps/details?id=io.heckel.ntfy"
+            target="_blank"
+            rel="noreferrer"
+            className="text-accent-700 underline"
+          >
+            Android
+          </a>
+          ).
+        </li>
+        <li>2. Gere o tópico abaixo e salve.</li>
+        <li>3. No app, toque em + e assine exatamente esse tópico.</li>
+        <li>4. Use o botão de teste para confirmar que chega.</li>
+      </ol>
+
       <div className="mt-4 flex flex-wrap items-end gap-2">
-        <label className="flex-1 min-w-[220px] text-sm">
-          <span className="mb-1 block font-medium text-sand-700">Número com DDD</span>
+        <label className="min-w-[240px] flex-1 text-sm">
+          <span className="mb-1 block font-medium text-sand-700">Tópico</span>
           <input
-            value={value}
+            value={topic}
             onChange={(e) => {
+              setTopic(e.target.value);
               setTouched(true);
-              setValue(e.target.value);
             }}
-            inputMode="numeric"
-            placeholder="63 99999-0000"
-            className="w-full rounded-lg border border-sand-200 px-3 py-2 text-sm text-sand-800 outline-none focus:border-accent-400"
+            placeholder="studio-xxxxxxxxxxxxxxxxxxxx"
+            className="w-full rounded-lg border border-sand-200 px-3 py-2 font-mono text-sm text-sand-800 outline-none focus:border-accent-400"
           />
         </label>
         <button
-          onClick={() => save(value.replace(/\D/g, "") || null)}
+          type="button"
+          onClick={gerar}
+          className="rounded-lg border border-accent-200 bg-accent-50 px-4 py-2.5 text-sm font-medium text-accent-700 hover:bg-accent-100"
+        >
+          Gerar
+        </button>
+        <button
+          type="button"
+          onClick={() => salvar(topic.trim() || null)}
           disabled={busy}
           className="rounded-lg bg-accent-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-accent-700 disabled:opacity-50"
         >
           {busy ? "Salvando…" : "Salvar"}
         </button>
-        {data.notifyPhone && (
+      </div>
+
+      <p className="mt-2 text-xs text-amber-700">
+        Qualquer pessoa que souber o nome do tópico consegue ler esses avisos, que levam nome
+        da cliente e valor. Use o botão <strong>Gerar</strong> e não compartilhe o tópico.
+      </p>
+
+      {salvo && (
+        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-accent-100 pt-4">
           <button
+            type="button"
+            onClick={testar}
+            disabled={testing}
+            className="rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {testing ? "Enviando…" : "Enviar push de teste"}
+          </button>
+          <button
+            type="button"
             onClick={() => {
-              setValue("");
-              save(null);
+              setTopic("");
+              salvar(null);
             }}
             disabled={busy}
             className="rounded-lg border border-accent-200 bg-accent-50 px-4 py-2.5 text-sm font-medium text-accent-700 hover:bg-accent-100 disabled:opacity-50"
           >
             Remover
           </button>
-        )}
-      </div>
+          <span className="text-xs text-sand-400">Servidor: {data.ntfy.server}</span>
+        </div>
+      )}
     </section>
   );
 }
@@ -679,7 +783,7 @@ function Logs({
               <div className="flex flex-wrap items-center gap-2">
                 <StatusBadge status={n.status} />
                 <DeliveryBadge n={n} />
-                {n.status === "failed" && (
+                {n.status === "failed" && !n.error?.includes("recusou o envio") && (
                   <button
                     onClick={() => onRetry(n.id)}
                     className="text-xs font-semibold text-accent-700 hover:underline"

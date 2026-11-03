@@ -350,30 +350,47 @@ async function applyPaidPayment(
       });
     }
 
-    // Mensagem para a GESTORA (aviso de sinal recebido).
-    // No modo manual isso seria "voce mandando para voce mesma" (o painel ja
-    // te avisa), entao so enfileiramos quando o envio e automatico (baileys).
+    // Aviso interno para a GESTORA (sinal recebido).
     //
-    // IMPORTANTE: vai para notify_phone, que precisa ser um numero DIFERENTE do
-    // conectado ao robo. Enviar para o proprio numero cai na conversa "Mensagem
-    // para voce mesmo" e o WhatsApp nunca notifica. Sem notify_phone cadastrado
-    // caimos no telefone do studio: o envio falha com um erro explicativo no
-    // painel, em vez de sumir sem deixar rastro.
-    const managerPhone = business?.notifyPhone || business?.phone;
-    if (managerPhone && env.WHATSAPP_MODE === 'baileys') {
-      const managerBody = renderTemplate(FALLBACK_BODIES.manager_paid, vars);
+    // Sai por PUSH do ntfy, nao por WhatsApp. O destino do aviso e o proprio
+    // studio, e o WhatsApp nao notifica mensagem que voce manda para voce
+    // mesma -- ela cai na conversa "Mensagem para voce mesmo", sem aviso
+    // nenhum no aparelho. O ntfy tem app de iPhone e Android e notifica de
+    // verdade.
+    //
+    // As mensagens da CLIENTE continuam no WhatsApp; isto aqui e so o aviso
+    // interno. Sem ntfy configurado, caimos no WhatsApp como antes.
+    const managerBody = renderTemplate(FALLBACK_BODIES.manager_paid, vars);
+
+    if (business?.ntfyTopic) {
       await tx.notificationJob.create({
         data: {
           businessId: appointment.businessId,
           appointmentId: appointment.id,
           triggerKey: 'manager_paid',
-          channel: 'whatsapp',
-          toPhone: managerPhone,
+          channel: 'ntfy',
+          toPhone: business.ntfyTopic,
           body: managerBody,
           scheduledFor: new Date(),
           status: 'pending',
         },
       });
+    } else {
+      const managerPhone = business?.notifyPhone || business?.phone;
+      if (managerPhone && env.WHATSAPP_MODE === 'baileys') {
+        await tx.notificationJob.create({
+          data: {
+            businessId: appointment.businessId,
+            appointmentId: appointment.id,
+            triggerKey: 'manager_paid',
+            channel: 'whatsapp',
+            toPhone: managerPhone,
+            body: managerBody,
+            scheduledFor: new Date(),
+            status: 'pending',
+          },
+        });
+      }
     }
   });
 }
