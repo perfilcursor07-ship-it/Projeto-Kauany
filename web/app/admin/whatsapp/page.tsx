@@ -22,6 +22,14 @@ type Notification = {
   appointment: { clientName: string; startAt: string; status: string } | null;
 };
 
+type TestMessage = {
+  triggerKey: string;
+  label: string;
+  body: string;
+  source: "template" | "padrao";
+  internal: boolean;
+};
+
 type NotificationsResponse = {
   mode: "manual" | "baileys";
   studioPhone: string | null;
@@ -185,6 +193,8 @@ export default function WhatsappPage() {
             </p>
           </div>
 
+          <TestSendCard manual connected={false} />
+
           {/* Mensagens para enviar */}
           <section className="rounded-lg border border-accent-100 bg-white p-5 shadow-sm shadow-accent-100/40">
             <div className="mb-4 flex items-center justify-between">
@@ -276,10 +286,192 @@ export default function WhatsappPage() {
         <>
           <BaileysPanel st={st} onChanged={loadStatus} />
           <NotifyPhoneCard data={data} onSaved={loadData} />
+          <TestSendCard manual={false} connected={st.status === "connected"} />
           <Logs notifications={notifications} onRetry={retry} onResendAddress={resendAddress} resendingId={resendingId} />
         </>
       )}
     </div>
+  );
+}
+
+// Envio de teste: escolhe qual mensagem, confere o texto exatamente como a
+// cliente vai receber e manda para um numero qualquer. O texto vem do backend
+// com a mesma regra do envio real (template do banco, senao o padrao), por
+// isso o teste e fiel.
+function TestSendCard({ manual, connected }: { manual: boolean; connected: boolean }) {
+  const [messages, setMessages] = useState<TestMessage[]>([]);
+  const [selected, setSelected] = useState<string>("");
+  const [body, setBody] = useState("");
+  const [edited, setEdited] = useState(false);
+  const [phone, setPhone] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api<{ messages: TestMessage[] }>("/api/admin/whatsapp/test-messages", { auth: true })
+      .then((r) => {
+        setMessages(r.messages);
+        const first = r.messages[0];
+        if (first) {
+          setSelected(first.triggerKey);
+          setBody(first.body);
+        }
+      })
+      .catch((e: any) => setErr(e.message));
+  }, []);
+
+  const current = messages.find((m) => m.triggerKey === selected) ?? null;
+
+  function pick(triggerKey: string) {
+    const found = messages.find((m) => m.triggerKey === triggerKey);
+    if (!found) return;
+    setSelected(triggerKey);
+    setBody(found.body);
+    setEdited(false);
+    setMsg(null);
+    setErr(null);
+  }
+
+  function restore() {
+    if (!current) return;
+    setBody(current.body);
+    setEdited(false);
+  }
+
+  async function send() {
+    const digits = phone.replace(/\D/g, "");
+    setMsg(null);
+    setErr(null);
+    if (digits.length < 10) {
+      setErr("Informe o número com DDD.");
+      return;
+    }
+    if (!body.trim()) {
+      setErr("A mensagem está vazia.");
+      return;
+    }
+
+    // No modo manual o robo nao envia: abre o WhatsApp com o texto pronto.
+    if (manual) {
+      window.open(waLink(digits, body), "_blank");
+      setMsg("WhatsApp aberto com a mensagem pronta para enviar.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await api("/api/admin/whatsapp/test", {
+        method: "POST",
+        auth: true,
+        body: JSON.stringify({ to: digits, message: body }),
+      });
+      setMsg(`Mensagem de teste enviada para ${digits}. Confira no aparelho.`);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-accent-100 bg-white p-5 shadow-sm shadow-accent-100/40">
+      <h2 className="font-display text-lg text-sand-900">Testar mensagens</h2>
+      <p className="mt-1 text-sm text-sand-500">
+        Escolha a mensagem, confira o texto e envie para um número para ver como a cliente
+        recebe. O teste usa dados de exemplo e <strong>não entra nos logs de envio</strong>.
+      </p>
+
+      {err && (
+        <div className="mt-3 rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+          {err}
+        </div>
+      )}
+      {msg && (
+        <div className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+          {msg}
+        </div>
+      )}
+      {!manual && !connected && (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          O WhatsApp está desconectado. Conecte acima para conseguir enviar o teste.
+        </div>
+      )}
+
+      {/* Qual mensagem */}
+      <div className="mt-4 flex flex-wrap gap-2">
+        {messages.map((m) => (
+          <button
+            key={m.triggerKey}
+            type="button"
+            onClick={() => pick(m.triggerKey)}
+            className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition ${
+              m.triggerKey === selected
+                ? "border-accent-500 bg-accent-600 text-white"
+                : "border-accent-200 bg-accent-50 text-accent-700 hover:bg-accent-100"
+            }`}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      {current && (
+        <p className="mt-2 text-xs text-sand-400">
+          {current.source === "template"
+            ? "Texto vindo do template salvo no painel."
+            : "Texto padrão do sistema (nenhum template salvo para esta mensagem)."}
+          {current.internal && " · Esta mensagem é o aviso para a gestora, não vai para a cliente."}
+        </p>
+      )}
+
+      {/* Previa editavel */}
+      <label className="mt-4 block text-sm">
+        <span className="mb-1 flex items-center justify-between font-medium text-sand-700">
+          Como vai chegar
+          {edited && (
+            <button
+              type="button"
+              onClick={restore}
+              className="text-xs font-semibold text-accent-700 hover:underline"
+            >
+              Restaurar texto original
+            </button>
+          )}
+        </span>
+        <textarea
+          value={body}
+          onChange={(e) => {
+            setBody(e.target.value);
+            setEdited(true);
+          }}
+          rows={8}
+          className="w-full whitespace-pre-line rounded-lg border border-sand-200 px-3 py-2 text-sm text-sand-800 outline-none focus:border-accent-400"
+        />
+      </label>
+
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <label className="min-w-[200px] flex-1 text-sm">
+          <span className="mb-1 block font-medium text-sand-700">Enviar para (com DDD)</span>
+          <input
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            inputMode="numeric"
+            placeholder="63 99999-0000"
+            className="w-full rounded-lg border border-sand-200 px-3 py-2 text-sm text-sand-800 outline-none focus:border-accent-400"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={send}
+          disabled={busy || (!manual && !connected)}
+          className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <WaIcon className="h-4 w-4" />
+          {busy ? "Enviando…" : manual ? "Abrir no WhatsApp" : "Enviar teste"}
+        </button>
+      </div>
+    </section>
   );
 }
 

@@ -9,7 +9,17 @@ import {
   sendText,
 } from '../modules/whatsapp/whatsapp.service.js';
 import { prisma } from '../lib/prisma.js';
-import { firstName, STUDIO_ADDRESS_URL } from '../modules/whatsapp/templates.js';
+import {
+  FALLBACK_BODIES,
+  fallbackBody,
+  firstName,
+  INTERNAL_TRIGGERS,
+  renderTemplate,
+  sampleVars,
+  STUDIO_ADDRESS_URL,
+  TESTABLE_TRIGGERS,
+  triggerLabel,
+} from '../modules/whatsapp/templates.js';
 
 function businessIdOf(req: FastifyRequest): bigint {
   return BigInt(req.user.businessId);
@@ -36,10 +46,49 @@ export async function whatsappRoutes(app: FastifyInstance) {
     return { status: 'disconnected' };
   });
 
+  // Mensagens disponiveis para teste, ja preenchidas com dados de exemplo.
+  // Usa a mesma regra do envio real: template ativo do banco se existir,
+  // senao o texto padrao do codigo. Assim o teste mostra o que a cliente ve.
+  app.get('/test-messages', async (req) => {
+    const businessId = businessIdOf(req);
+    const [business, templates] = await Promise.all([
+      prisma.business.findUnique({
+        where: { id: businessId },
+        select: { name: true, timezone: true },
+      }),
+      prisma.notificationTemplate.findMany({
+        where: { businessId, channel: 'whatsapp', active: true },
+        select: { triggerKey: true, body: true },
+      }),
+    ]);
+
+    const byTrigger = new Map(templates.map((t) => [t.triggerKey, t.body]));
+    const vars = sampleVars(business?.name ?? '', business?.timezone ?? 'America/Sao_Paulo');
+
+    return {
+      sample: vars,
+      messages: TESTABLE_TRIGGERS.map((triggerKey) => {
+        // address_update e manager_paid nao consultam a tabela no envio real,
+        // entao o teste tambem nao consulta: o texto vem sempre do codigo.
+        const usesTemplate = !['address_update', 'manager_paid'].includes(triggerKey);
+        const custom = usesTemplate ? byTrigger.get(triggerKey) : undefined;
+        const body = custom ?? fallbackBody(triggerKey) ?? '';
+
+        return {
+          triggerKey,
+          label: triggerLabel(triggerKey),
+          body: renderTemplate(body, vars),
+          source: custom ? 'template' : 'padrao',
+          internal: INTERNAL_TRIGGERS.includes(triggerKey),
+        };
+      }),
+    };
+  });
+
   // Envio de teste (para validar a conexao).
   app.post('/test', async (req, reply) => {
     const parsed = z
-      .object({ to: z.string().min(8), message: z.string().min(1).max(1000) })
+      .object({ to: z.string().min(8), message: z.string().min(1).max(4000) })
       .safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ message: 'Dados invalidos' });
@@ -186,10 +235,10 @@ export async function whatsappRoutes(app: FastifyInstance) {
         triggerKey: 'address_update',
         channel: 'whatsapp',
         toPhone: original.toPhone,
-        body:
-          `Olá, ${firstName(appointment.client.name)}! ✨\n\n` +
-          `Passando para corrigir o endereço do seu agendamento. O endereço correto é:\n${STUDIO_ADDRESS_URL}\n\n` +
-          'Desculpe pelo transtorno. Te espero no horário combinado!',
+        body: renderTemplate(FALLBACK_BODIES.address_update, {
+          primeiro_nome: firstName(appointment.client.name),
+          endereco: STUDIO_ADDRESS_URL,
+        }),
         scheduledFor: new Date(),
         status: 'pending',
       },

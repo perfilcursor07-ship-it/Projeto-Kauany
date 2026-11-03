@@ -7,7 +7,7 @@ import {
   createPublicAppointment,
   AppointmentError,
 } from '../modules/appointments/appointments.service.js';
-import { renderTemplate, firstName } from '../modules/whatsapp/templates.js';
+import { FALLBACK_BODIES, renderTemplate, firstName } from '../modules/whatsapp/templates.js';
 
 function businessIdOf(req: FastifyRequest): bigint {
   return BigInt(req.user.businessId);
@@ -583,15 +583,37 @@ export async function adminRoutes(app: FastifyInstance) {
     }
     if (status) where.status = status;
 
-    return prisma.appointment.findMany({
+    const rows = await prisma.appointment.findMany({
       where,
       include: {
         service: { select: { name: true } },
         appointmentServices: { include: { service: { select: { name: true } } } },
         client: { select: { name: true, phone: true } },
         professional: { select: { name: true } },
+        payments: { select: { amount: true, status: true, paidAt: true } },
       },
       orderBy: { startAt: 'asc' },
+    });
+
+    // deposit_amount e o sinal EXIGIDO, nao o pago: um agendamento manual nasce
+    // confirmado com deposit_amount > 0 e nenhum pagamento. Entao o valor pago
+    // sai da soma dos pagamentos liquidados, e o restante do que falta receber
+    // no dia do atendimento.
+    return rows.map(({ payments, ...appointment }) => {
+      const settled = payments.filter((payment) => payment.status === 'paid');
+      const paid = settled.reduce((sum, payment) => sum + Number(payment.amount), 0);
+      const total = Number(appointment.totalAmount);
+      const lastPaidAt = settled
+        .map((payment) => payment.paidAt)
+        .filter((date): date is Date => date !== null)
+        .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+
+      return {
+        ...appointment,
+        paidAmount: paid.toFixed(2),
+        remainingAmount: Math.max(0, total - paid).toFixed(2),
+        paidAt: lastPaidAt,
+      };
     });
   });
 
@@ -700,9 +722,7 @@ export async function adminRoutes(app: FastifyInstance) {
               triggerKey: 'cancelled',
               channel: 'whatsapp',
               toPhone: client.phone,
-              body: tpl
-                ? renderTemplate(tpl.body, vars)
-                : `Ola, ${vars.cliente}. Seu agendamento de ${vars.data} as ${vars.hora} foi cancelado.`,
+              body: renderTemplate(tpl?.body ?? FALLBACK_BODIES.cancelled, vars),
               scheduledFor: new Date(),
               status: 'pending',
             },

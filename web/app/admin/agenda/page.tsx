@@ -1,14 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, brl, formatTime } from "@/lib/api";
 
 type Appt = {
   id: string;
   startAt: string;
+  endAt: string;
   status: string;
+  paymentStatus: string;
   totalAmount: string;
   depositAmount: string;
+  // Calculados no backend a partir dos pagamentos liquidados.
+  paidAmount: string;
+  remainingAmount: string;
+  paidAt: string | null;
+  notes: string | null;
   service: { name: string };
   appointmentServices?: { sortOrder: number; service: { name: string } }[];
   client: { name: string; phone: string };
@@ -23,9 +30,65 @@ type Service = {
   active: boolean;
 };
 
+// Data de hoje no fuso local. new Date().toISOString() converte para UTC e,
+// no Brasil, devolve o dia seguinte depois das 21h.
+function todayIso() {
+  const d = new Date();
+  const month = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  return `${d.getFullYear()}-${month}-${day}`;
+}
+
+function shiftIso(iso: string, days: number) {
+  const d = new Date(`${iso}T12:00:00`);
+  d.setDate(d.getDate() + days);
+  const month = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  return `${d.getFullYear()}-${month}-${day}`;
+}
+
+function longDate(iso: string) {
+  return new Date(`${iso}T12:00:00`).toLocaleDateString("pt-BR", {
+    weekday: "long",
+    day: "2-digit",
+    month: "long",
+  });
+}
+
+// Telefone no formato (DD) 9XXXX-XXXX.
+function prettyPhone(phone: string) {
+  const d = phone.replace(/\D/g, "");
+  const local = d.startsWith("55") && d.length > 11 ? d.slice(2) : d;
+  if (local.length < 10) return phone;
+  const rest = local.slice(2);
+  return `(${local.slice(0, 2)}) ${rest.slice(0, rest.length - 4)}-${rest.slice(-4)}`;
+}
+
+// Link do WhatsApp da cliente (normaliza o DDI 55).
+function waPhoneLink(phone: string) {
+  const d = phone.replace(/\D/g, "");
+  return `https://wa.me/${d.startsWith("55") ? d : `55${d}`}`;
+}
+
+// Data curta do pagamento do sinal, para o rodape da celula.
+function paidHint(paidAt: string | null) {
+  if (!paidAt) return undefined;
+  return new Date(paidAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+}
+
+// Periodos do dia: agrupar deixa a leitura da agenda muito mais rapida.
+const PERIODS = [
+  { label: "Manhã", from: 0, to: 12 },
+  { label: "Tarde", from: 12, to: 18 },
+  { label: "Noite", from: 18, to: 24 },
+];
+
+// Cancelado / faltou nao entram nas contas do dia.
+const DEAD_STATUSES = ["cancelled", "no_show", "expired", "removed"];
+
 const emptyForm = {
   serviceId: "",
-  date: new Date().toISOString().slice(0, 10),
+  date: todayIso(),
   time: "",
   clientName: "",
   clientPhone: "",
@@ -44,7 +107,7 @@ const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
 };
 
 export default function AgendaPage() {
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(todayIso());
   const [items, setItems] = useState<Appt[]>([]);
   const [services, setServices] = useState<Service[]>([]);
   const [form, setForm] = useState({ ...emptyForm });
@@ -54,7 +117,13 @@ export default function AgendaPage() {
   const [saving, setSaving] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
 
+  // A pagina monta com a data de hoje e so depois le ?date= da URL, entao duas
+  // buscas saem quase juntas. Sem este contador a resposta da primeira chega
+  // por ultimo e apaga a lista da data pedida.
+  const reqSeq = useRef(0);
+
   const load = useCallback(async () => {
+    const seq = ++reqSeq.current;
     setLoading(true);
     setError(null);
     try {
@@ -62,11 +131,13 @@ export default function AgendaPage() {
         `/api/admin/appointments?from=${date}&to=${date}`,
         { auth: true },
       );
+      if (seq !== reqSeq.current) return; // resposta de uma data ja trocada
       setItems(r);
     } catch (e: any) {
+      if (seq !== reqSeq.current) return;
       setError(e.message);
     } finally {
-      setLoading(false);
+      if (seq === reqSeq.current) setLoading(false);
     }
   }, [date]);
 
@@ -172,6 +243,23 @@ export default function AgendaPage() {
     }
   }
 
+  // Cancelados / faltas nao entram no dinheiro do dia.
+  const live = items.filter((a) => !DEAD_STATUSES.includes(a.status));
+  const summary = {
+    count: live.length,
+    total: live.reduce((sum, a) => sum + Number(a.totalAmount), 0),
+    paid: live.reduce((sum, a) => sum + Number(a.paidAmount), 0),
+    remaining: live.reduce((sum, a) => sum + Number(a.remainingAmount), 0),
+  };
+
+  const groups = PERIODS.map((period) => ({
+    label: period.label,
+    items: items.filter((a) => {
+      const hour = new Date(a.startAt).getHours();
+      return hour >= period.from && hour < period.to;
+    }),
+  })).filter((group) => group.items.length > 0);
+
   return (
     <div className="space-y-5">
       <section className="flex flex-col gap-4 rounded-lg border border-accent-100 bg-white p-4 shadow-sm shadow-accent-100/40 sm:p-5 lg:flex-row lg:items-center lg:justify-between">
@@ -180,17 +268,42 @@ export default function AgendaPage() {
             Agenda
           </div>
           <h1 className="font-display text-3xl text-sand-900">Agenda do studio</h1>
-          <p className="mt-1 text-sm text-sand-500">
-            Acompanhe o dia, crie atendimentos manuais e atualize o status das clientes.
-          </p>
+          <p className="mt-1 text-sm capitalize text-sand-500">{longDate(date)}</p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            className="rounded-lg border border-accent-200 bg-accent-50 px-3 py-2 text-sm font-medium text-accent-800 outline-none focus:border-accent-500 focus:bg-white"
-          />
+          <div className="inline-flex items-center gap-1 rounded-lg border border-accent-200 bg-accent-50 p-1">
+            <button
+              type="button"
+              aria-label="Dia anterior"
+              onClick={() => setDate(shiftIso(date, -1))}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-accent-700 transition hover:bg-white"
+            >
+              <ChevronIcon className="h-4 w-4 rotate-180" />
+            </button>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="rounded-md border-0 bg-transparent px-1 py-1 text-sm font-medium text-accent-800 outline-none"
+            />
+            <button
+              type="button"
+              aria-label="Próximo dia"
+              onClick={() => setDate(shiftIso(date, 1))}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-accent-700 transition hover:bg-white"
+            >
+              <ChevronIcon className="h-4 w-4" />
+            </button>
+          </div>
+          {date !== todayIso() && (
+            <button
+              type="button"
+              onClick={() => setDate(todayIso())}
+              className="rounded-lg border border-sand-300 px-3 py-2 text-sm font-medium text-sand-700 transition hover:bg-sand-50"
+            >
+              Hoje
+            </button>
+          )}
           <button
             type="button"
             onClick={toggleForm}
@@ -272,6 +385,17 @@ export default function AgendaPage() {
         </form>
       )}
 
+      {/* Resumo do dia: quanto entra, quanto ja foi pago em sinal e o que ainda
+          falta receber no atendimento. */}
+      {!loading && live.length > 0 && (
+        <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <SummaryCard label="Atendimentos" value={String(summary.count)} />
+          <SummaryCard label="Total do dia" value={brl(summary.total)} />
+          <SummaryCard label="Sinal recebido" value={brl(summary.paid)} tone="good" />
+          <SummaryCard label="A receber no dia" value={brl(summary.remaining)} tone="warn" />
+        </section>
+      )}
+
       {loading && <p className="text-sand-400">Carregando…</p>}
       {!loading && items.length === 0 && (
         <p className="rounded-lg border border-accent-100 bg-white p-6 text-sm text-sand-400 shadow-sm shadow-accent-100/40">
@@ -279,59 +403,205 @@ export default function AgendaPage() {
         </p>
       )}
 
-      <div className="space-y-3">
-        {items.map((a) => {
-          const st = STATUS_LABEL[a.status] ?? { label: a.status, cls: "bg-sand-50 border-sand-200" };
-          const serviceLabel = a.appointmentServices?.length
-            ? a.appointmentServices
-                .slice()
-                .sort((first, second) => first.sortOrder - second.sortOrder)
-                .map((item) => item.service.name)
-                .join(" + ")
-            : a.service.name;
-          return (
-            <div key={a.id} className="rounded-lg border border-accent-100 bg-white p-4 shadow-sm shadow-accent-100/40 transition hover:-translate-y-0.5 hover:shadow-md">
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-4">
-                  <span className="font-display text-xl text-sand-900">
-                    {formatTime(a.startAt)}
-                  </span>
-                  <div>
-                    <p className="font-medium text-sand-900">{a.client.name}</p>
-                    <p className="text-xs text-sand-500">
-                      {serviceLabel} · {brl(Number(a.totalAmount))} · {a.client.phone}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`rounded-full border px-3 py-1 text-xs font-medium ${st.cls}`}>
-                    {st.label}
-                  </span>
-                  <button
-                    type="button"
-                    title="Remover agendamento"
-                    aria-label={`Remover agendamento de ${a.client.name}`}
-                    disabled={removingId === a.id}
-                    onClick={() => removeAppointment(a.id, a.client.name)}
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-200 text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <TrashIcon />
-                  </button>
-                </div>
-              </div>
-
-              {["confirmed", "pending_payment"].includes(a.status) && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <ActionBtn onClick={() => setStatus(a.id, "completed")}>Concluir</ActionBtn>
-                  <ActionBtn onClick={() => setStatus(a.id, "no_show")} variant="warn">Faltou</ActionBtn>
-                  <ActionBtn onClick={() => setStatus(a.id, "cancelled")} variant="danger">Cancelar</ActionBtn>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+      {groups.map((group) => (
+        <section key={group.label} className="space-y-3">
+          <div className="flex items-center gap-3">
+            <h2 className="font-display text-lg text-sand-900">{group.label}</h2>
+            <span className="rounded-full bg-accent-50 px-2 py-0.5 text-xs font-semibold text-accent-700">
+              {group.items.length}
+            </span>
+            <div className="h-px flex-1 bg-accent-100" />
+          </div>
+          {group.items.map((a) => (
+            <ApptCard
+              key={a.id}
+              appt={a}
+              removing={removingId === a.id}
+              onStatus={setStatus}
+              onRemove={removeAppointment}
+            />
+          ))}
+        </section>
+      ))}
     </div>
+  );
+}
+
+// Cartao de um atendimento: horario, cliente, servicos e o quadro de valores
+// (total / sinal pago / falta receber).
+function ApptCard({
+  appt: a,
+  removing,
+  onStatus,
+  onRemove,
+}: {
+  appt: Appt;
+  removing: boolean;
+  onStatus: (id: string, status: string) => void;
+  onRemove: (id: string, clientName: string) => void;
+}) {
+  const st = STATUS_LABEL[a.status] ?? { label: a.status, cls: "bg-sand-50 text-sand-600 border-sand-200" };
+  const serviceLabel = a.appointmentServices?.length
+    ? a.appointmentServices
+        .slice()
+        .sort((first, second) => first.sortOrder - second.sortOrder)
+        .map((item) => item.service.name)
+        .join(" + ")
+    : a.service.name;
+
+  const total = Number(a.totalAmount);
+  const paid = Number(a.paidAmount);
+  const remaining = Number(a.remainingAmount);
+  const dead = DEAD_STATUSES.includes(a.status);
+
+  // Concluir um atendimento nao registra o pagamento do restante, entao o
+  // rodape precisa dizer que o valor nao foi lancado em vez de prometer que
+  // ainda vai entrar.
+  const remainingHint =
+    remaining === 0
+      ? "quitado"
+      : dead
+        ? "não será recebido"
+        : a.status === "completed"
+          ? "não registrado"
+          : "no atendimento";
+
+  return (
+    <div
+      className={`overflow-hidden rounded-xl border bg-white shadow-sm shadow-accent-100/40 transition hover:shadow-md ${
+        dead ? "border-sand-200 opacity-70" : "border-accent-100"
+      }`}
+    >
+      <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:gap-4">
+        {/* Horario */}
+        <div className="flex shrink-0 items-center gap-3 sm:w-24 sm:flex-col sm:items-start sm:gap-0">
+          <span className="font-display text-2xl leading-none text-sand-900">
+            {formatTime(a.startAt)}
+          </span>
+          <span className="text-xs text-sand-400 sm:mt-1">até {formatTime(a.endAt)}</span>
+        </div>
+
+        <div className="hidden w-px self-stretch bg-accent-100 sm:block" />
+
+        {/* Cliente e servicos */}
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-medium text-sand-900">{a.client.name}</p>
+          <p className="mt-0.5 truncate text-sm text-sand-600">{serviceLabel}</p>
+          <a
+            href={waPhoneLink(a.client.phone)}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1 inline-flex items-center gap-1 text-xs text-sand-400 transition hover:text-accent-700 hover:underline"
+          >
+            {prettyPhone(a.client.phone)}
+          </a>
+          {a.notes && (
+            <p className="mt-2 rounded-lg bg-sand-50 px-3 py-2 text-xs text-sand-600">{a.notes}</p>
+          )}
+        </div>
+
+        {/* Status e remover */}
+        <div className="flex shrink-0 items-center gap-2 sm:flex-col sm:items-end">
+          <span className={`rounded-full border px-3 py-1 text-xs font-medium ${st.cls}`}>
+            {st.label}
+          </span>
+          <button
+            type="button"
+            title="Remover agendamento"
+            aria-label={`Remover agendamento de ${a.client.name}`}
+            disabled={removing}
+            onClick={() => onRemove(a.id, a.client.name)}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-200 text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <TrashIcon />
+          </button>
+        </div>
+      </div>
+
+      {/* Quadro de valores */}
+      <div className="grid grid-cols-3 divide-x divide-accent-100 border-t border-accent-100 bg-sand-50/60">
+        <MoneyCell label="Total" value={brl(total)} />
+        <MoneyCell
+          label="Sinal pago"
+          value={brl(paid)}
+          tone={paid > 0 ? "good" : "muted"}
+          hint={paid === 0 ? "sem sinal" : paidHint(a.paidAt)}
+        />
+        <MoneyCell
+          label="Falta receber"
+          value={brl(remaining)}
+          tone={remaining === 0 ? "good" : "warn"}
+          hint={remainingHint}
+        />
+      </div>
+
+      {["confirmed", "pending_payment"].includes(a.status) && (
+        <div className="flex flex-wrap gap-2 border-t border-accent-100 px-4 py-3">
+          <ActionBtn onClick={() => onStatus(a.id, "completed")}>Concluir</ActionBtn>
+          <ActionBtn onClick={() => onStatus(a.id, "no_show")} variant="warn">Faltou</ActionBtn>
+          <ActionBtn onClick={() => onStatus(a.id, "cancelled")} variant="danger">Cancelar</ActionBtn>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SummaryCard({
+  label,
+  value,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  tone?: "default" | "good" | "warn";
+}) {
+  const cls =
+    tone === "good"
+      ? "text-emerald-700"
+      : tone === "warn"
+        ? "text-amber-700"
+        : "text-sand-900";
+  return (
+    <div className="rounded-lg border border-accent-100 bg-white px-4 py-3 shadow-sm shadow-accent-100/40">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-sand-400">{label}</p>
+      <p className={`mt-1 font-display text-xl ${cls}`}>{value}</p>
+    </div>
+  );
+}
+
+function MoneyCell({
+  label,
+  value,
+  tone = "default",
+  hint,
+}: {
+  label: string;
+  value: string;
+  tone?: "default" | "good" | "warn" | "muted";
+  hint?: string;
+}) {
+  const cls =
+    tone === "good"
+      ? "text-emerald-700"
+      : tone === "warn"
+        ? "text-amber-700"
+        : tone === "muted"
+          ? "text-sand-400"
+          : "text-sand-800";
+  return (
+    <div className="px-3 py-2.5 text-center">
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-sand-400">{label}</p>
+      <p className={`mt-0.5 text-sm font-semibold ${cls}`}>{value}</p>
+      {hint && <p className="text-[10px] text-sand-400">{hint}</p>}
+    </div>
+  );
+}
+
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <IconBase className={className}>
+      <path d="m9 18 6-6-6-6" />
+    </IconBase>
   );
 }
 

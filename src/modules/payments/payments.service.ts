@@ -12,7 +12,13 @@ import {
   appointmentServiceLabel,
   expireAppointmentIfNeeded,
 } from '../appointments/appointments.service.js';
-import { renderTemplate, STUDIO_ADDRESS_URL } from '../whatsapp/templates.js';
+import {
+  FALLBACK_BODIES,
+  greetingFor,
+  renderTemplate,
+  STUDIO_ADDRESS_URL,
+  STUDIO_LOCATION_URL,
+} from '../whatsapp/templates.js';
 import QRCode from 'qrcode';
 
 // Modo de teste: sem PagBank real. Ativado por PAYMENTS_MODE=fake ou quando
@@ -31,15 +37,6 @@ const fmtDate = (d: Date) =>
   d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
 const fmtTime = (d: Date) =>
   d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-
-function greetingFor(date: Date, timezone: string): string {
-  const hour = Number(
-    new Intl.DateTimeFormat('pt-BR', { timeZone: timezone, hour: '2-digit', hourCycle: 'h23' }).format(date),
-  );
-  if (hour < 12) return 'Bom Dia';
-  if (hour < 18) return 'Boa Tarde';
-  return 'Boa Noite';
-}
 
 export class PaymentError extends Error {
   constructor(
@@ -295,18 +292,14 @@ async function applyPaidPayment(
       restante: brl(total - deposit),
       studio: business?.name ?? '',
       endereco: STUDIO_ADDRESS_URL,
-      localizacao: 'https://maps.app.goo.gl/kW2nQ23ksDJDFPBG8?g_st=ic',
+      localizacao: STUDIO_LOCATION_URL,
     };
 
     // Mensagem para a CLIENTE (usa o template configuravel 'confirmed').
     const tpl = await tx.notificationTemplate.findFirst({
       where: { businessId: appointment.businessId, triggerKey: 'confirmed', channel: 'whatsapp', active: true },
     });
-    const clientBody = tpl
-      ? renderTemplate(tpl.body, vars)
-      : `${vars.cliente}, seu horário foi agendado!\n\n${vars.data} às ${vars.hora}\n` +
-        `Serviço: ${vars.servico}\nValor: ${vars.valor}\n\nEndereço: ${vars.endereco}\n\n` +
-        'Te espero no horário combinado! ✨';
+    const clientBody = renderTemplate(tpl?.body ?? FALLBACK_BODIES.confirmed, vars);
 
     await tx.notificationJob.create({
       data: {
@@ -327,20 +320,12 @@ async function applyPaidPayment(
       {
         trigger: 'reminder_24h',
         when: new Date(appointment.startAt.getTime() - 24 * 60 * 60 * 1000),
-        fallback:
-          '{saudacao}, {cliente}! ✨\n\n' +
-          'Passando para te lembrar do seu horário agendado amanhã às {hora}.\n\n' +
-          'Em caso de atraso, temos uma tolerância de 10 minutos e, se possível, venha sem acompanhante. ' +
-          'Esse momento é todo seu, te aguardo!',
+        fallback: FALLBACK_BODIES.reminder_24h,
       },
       {
         trigger: 'reminder_2h',
         when: new Date(appointment.startAt.getTime() - 2 * 60 * 60 * 1000),
-        fallback:
-          '{saudacao}, {cliente}! ✨\n\n' +
-          'Passando para te lembrar do seu horário agendado hoje às {hora}.\n\n' +
-          'Não esqueça de sair com antecedência para evitar o cancelamento automático do seu horário. ✨\n\n' +
-          'Localização: {localizacao}',
+        fallback: FALLBACK_BODIES.reminder_2h,
       },
     ];
     for (const r of reminders) {
@@ -376,10 +361,7 @@ async function applyPaidPayment(
     // painel, em vez de sumir sem deixar rastro.
     const managerPhone = business?.notifyPhone || business?.phone;
     if (managerPhone && env.WHATSAPP_MODE === 'baileys') {
-      const managerBody =
-        `💰 Sinal recebido!\n\n${appointment.client.name} pagou ${vars.sinal} de sinal.\n` +
-        `Servico: ${vars.servico}\n📅 ${vars.data} às ${vars.hora}\n` +
-        `Valor total: ${vars.valor} · Restante: ${vars.restante}`;
+      const managerBody = renderTemplate(FALLBACK_BODIES.manager_paid, vars);
       await tx.notificationJob.create({
         data: {
           businessId: appointment.businessId,
