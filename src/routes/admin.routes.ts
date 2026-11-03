@@ -6,7 +6,10 @@ import {
   appointmentServiceLabel,
   createPublicAppointment,
   AppointmentError,
+  isSlotStillFree,
 } from '../modules/appointments/appointments.service.js';
+import { enqueuePaymentReminder } from '../modules/notifications/payment-reminder.js';
+import { env } from '../config/env.js';
 import { FALLBACK_BODIES, renderTemplate, firstName } from '../modules/whatsapp/templates.js';
 
 function businessIdOf(req: FastifyRequest): bigint {
@@ -615,6 +618,123 @@ export async function adminRoutes(app: FastifyInstance) {
         paidAt: lastPaidAt,
       };
     });
+  });
+
+  // ------------------- COBRANCA MANUAL DO SINAL -------------------------
+  // Agendamentos que ficaram sem sinal. Alimenta o card do /admin/whatsapp e o
+  // botao de cobrar na agenda.
+  app.get('/appointments/unpaid', async (req) => {
+    const businessId = businessIdOf(req);
+    const desde = new Date();
+    desde.setDate(desde.getDate() - 7);
+    desde.setHours(0, 0, 0, 0);
+
+    const rows = await prisma.appointment.findMany({
+      where: {
+        businessId,
+        status: { in: ['pending_payment', 'expired'] },
+        startAt: { gte: desde },
+      },
+      include: {
+        service: { select: { name: true } },
+        appointmentServices: { include: { service: { select: { name: true } } } },
+        client: { select: { name: true, phone: true } },
+        payments: { select: { status: true } },
+      },
+      orderBy: { startAt: 'asc' },
+      take: 50,
+    });
+
+    // Quem ja pagou nao entra na lista, mesmo que o status tenha ficado para tras.
+    return rows
+      .filter((a) => !a.payments.some((p) => p.status === 'paid'))
+      .map((a) => ({
+        id: a.id.toString(),
+        clientName: a.client.name,
+        clientPhone: a.client.phone,
+        service: appointmentServiceLabel(a),
+        startAt: a.startAt,
+        status: a.status,
+        totalAmount: a.totalAmount,
+        depositAmount: a.depositAmount,
+        // A reserva ja caiu? Nesse caso cobrar exige renovar o prazo.
+        holdExpired: !!a.expiresAt && a.expiresAt <= new Date(),
+      }));
+  });
+
+  // Enfileira a cobranca do sinal AGORA, para um agendamento especifico.
+  //
+  // Serve para os casos que o automatico nao cobriu: agendamento feito antes
+  // desta funcionalidade existir, ou envio que falhou no WhatsApp.
+  //
+  // Se a reserva ja caiu, o link de pagamento estaria morto -- entao renovamos
+  // o prazo antes de enviar, mas so se ninguem tiver ocupado o horario.
+  app.post('/appointments/:id/charge-reminder', async (req, reply) => {
+    const parsed = z.object({ id: z.coerce.bigint() }).safeParse(req.params);
+    if (!parsed.success) return reply.code(400).send({ message: 'Agendamento invalido' });
+
+    const businessId = businessIdOf(req);
+    const appointment = await prisma.appointment.findFirst({
+      where: { id: parsed.data.id, businessId },
+      include: {
+        service: { select: { name: true } },
+        appointmentServices: { include: { service: { select: { name: true } } } },
+        client: { select: { name: true, phone: true } },
+        payments: { select: { status: true } },
+      },
+    });
+    if (!appointment) return reply.code(404).send({ message: 'Agendamento nao encontrado' });
+
+    if (appointment.payments.some((p) => p.status === 'paid')) {
+      return reply.code(409).send({ message: 'Esta cliente ja pagou o sinal' });
+    }
+    if (!['pending_payment', 'expired'].includes(appointment.status)) {
+      return reply.code(409).send({
+        message: 'So da para cobrar o sinal de agendamento que esta aguardando pagamento',
+      });
+    }
+    if (Number(appointment.depositAmount) <= 0) {
+      return reply.code(409).send({ message: 'Este agendamento nao tem sinal a pagar' });
+    }
+
+    // Renova a reserva quando necessario, para o link funcionar.
+    const expirou = !appointment.expiresAt || appointment.expiresAt <= new Date();
+    let renovadoAte: Date | null = null;
+    if (expirou || appointment.status === 'expired') {
+      if (!(await isSlotStillFree(appointment.id))) {
+        return reply.code(409).send({
+          message: 'O horario ja foi ocupado por outra cliente. Nao da para reabrir a reserva.',
+        });
+      }
+      renovadoAte = new Date(Date.now() + env.RESERVATION_MINUTES * 60_000);
+      await prisma.appointment.update({
+        where: { id: appointment.id },
+        data: {
+          status: 'pending_payment',
+          paymentStatus: 'pending',
+          expiresAt: renovadoAte,
+        },
+      });
+    }
+
+    const body = await enqueuePaymentReminder(prisma, {
+      id: appointment.id,
+      businessId,
+      token: appointment.token,
+      startAt: appointment.startAt,
+      totalAmount: appointment.totalAmount,
+      depositAmount: appointment.depositAmount,
+      serviceLabel: appointmentServiceLabel(appointment),
+      clientName: appointment.client.name,
+      clientPhone: appointment.client.phone,
+    });
+
+    return {
+      queued: true,
+      renewed: renovadoAte !== null,
+      minutes: renovadoAte ? env.RESERVATION_MINUTES : null,
+      body,
+    };
   });
 
   // Criacao manual (ja confirmada, sem exigir sinal).

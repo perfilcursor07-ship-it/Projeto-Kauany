@@ -2,16 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { env } from '../../config/env.js';
-import {
-  appointmentLink,
-  FALLBACK_BODIES,
-  firstName,
-  renderTemplate,
-  STUDIO_ADDRESS_URL,
-} from '../whatsapp/templates.js';
-
-const brl = (v: number) =>
-  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v);
+import { enqueuePaymentReminder } from '../notifications/payment-reminder.js';
 
 function addMinutes(date: Date, minutes: number): Date {
   return new Date(date.getTime() + minutes * 60_000);
@@ -246,55 +237,88 @@ export async function createPublicAppointment(input: CreateAppointmentInput) {
 
     // Cobranca automatica de quem agenda e nao paga o sinal.
     //
-    // Enfileirada junto com o agendamento, para sair PAYMENT_REMINDER_MINUTES
-    // depois. O worker so envia se o agendamento ainda estiver esperando
-    // pagamento -- se a cliente pagar antes, o job e cancelado sozinho.
-    //
-    // O link so funciona enquanto a reserva estiver de pe, por isso o aviso
-    // em env.ts de manter RESERVATION_MINUTES maior que este prazo.
+    // Sai PAYMENT_REMINDER_MINUTES depois. O worker so envia se o agendamento
+    // ainda estiver esperando pagamento -- se a cliente pagar antes, o job e
+    // cancelado sozinho. O texto vem do mesmo lugar que o envio manual do
+    // painel usa, para os dois nunca divergirem.
     if (requiresDeposit) {
-      const business = await tx.business.findUnique({
-        where: { id: businessId },
-        select: { name: true },
-      });
-      const vars: Record<string, string> = {
-        cliente: client.name.trim(),
-        primeiro_nome: firstName(client.name),
-        servico: appointmentServiceLabel(appointment),
-        data: startAt.toLocaleDateString('pt-BR', {
-          day: '2-digit',
-          month: '2-digit',
-          year: 'numeric',
-        }),
-        hora: startAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-        valor: brl(Number(totalAmount)),
-        sinal: brl(deposit),
-        restante: brl(Number(totalAmount) - deposit),
-        studio: business?.name ?? '',
-        link: appointmentLink(env.PUBLIC_WEB_URL, token),
-        endereco: STUDIO_ADDRESS_URL,
-      };
-
-      const tpl = await tx.notificationTemplate.findFirst({
-        where: { businessId, triggerKey: 'payment_pending', channel: 'whatsapp', active: true },
-      });
-
-      await tx.notificationJob.create({
-        data: {
+      await enqueuePaymentReminder(
+        tx,
+        {
+          id: appointment.id,
           businessId,
-          appointmentId: appointment.id,
-          triggerKey: 'payment_pending',
-          channel: 'whatsapp',
-          toPhone: client.phone,
-          body: renderTemplate(tpl?.body ?? FALLBACK_BODIES.payment_pending, vars),
-          scheduledFor: addMinutes(new Date(), env.PAYMENT_REMINDER_MINUTES),
-          status: 'pending',
+          token,
+          startAt,
+          totalAmount,
+          depositAmount: deposit,
+          serviceLabel: appointmentServiceLabel(appointment),
+          clientName: client.name,
+          clientPhone: client.phone,
         },
-      });
+        addMinutes(new Date(), env.PAYMENT_REMINDER_MINUTES),
+      );
     }
 
     return { appointment, requiresDeposit };
   });
+}
+
+// O horario deste agendamento continua livre?
+//
+// Usado ao renovar a reserva de quem nao pagou: a cobranca manual so faz
+// sentido se ninguem tiver ocupado o horario no meio tempo. Ignora o proprio
+// agendamento na comparacao.
+export async function isSlotStillFree(appointmentId: bigint): Promise<boolean> {
+  const appointment = await prisma.appointment.findUnique({
+    where: { id: appointmentId },
+    include: {
+      service: { select: { bufferMinutes: true } },
+      appointmentServices: { include: { service: { select: { bufferMinutes: true } } } },
+    },
+  });
+  if (!appointment) return false;
+
+  const now = new Date();
+  const busyEnd = addMinutes(appointment.endAt, appointmentBufferMinutes(appointment));
+  const dayStart = new Date(appointment.startAt);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(appointment.startAt);
+  dayEnd.setHours(23, 59, 59, 999);
+
+  const sameDay = await prisma.appointment.findMany({
+    where: {
+      businessId: appointment.businessId,
+      professionalId: appointment.professionalId,
+      id: { not: appointmentId },
+      startAt: { gte: dayStart, lte: dayEnd },
+      OR: [
+        { status: { in: ['confirmed', 'completed'] } },
+        {
+          status: 'pending_payment',
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+        },
+      ],
+    },
+    include: {
+      service: { select: { bufferMinutes: true } },
+      appointmentServices: { include: { service: { select: { bufferMinutes: true } } } },
+    },
+  });
+
+  const conflito = sameDay.some((other) =>
+    overlaps(appointment.startAt, busyEnd, other.startAt, addMinutes(other.endAt, appointmentBufferMinutes(other))),
+  );
+  if (conflito) return false;
+
+  const bloqueios = await prisma.blockedTime.count({
+    where: {
+      businessId: appointment.businessId,
+      OR: [{ professionalId: appointment.professionalId }, { professionalId: null }],
+      startAt: { lt: busyEnd },
+      endAt: { gt: appointment.startAt },
+    },
+  });
+  return bloqueios === 0;
 }
 
 export async function getAppointmentByToken(token: string) {

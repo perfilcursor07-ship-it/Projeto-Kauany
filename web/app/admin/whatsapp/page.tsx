@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, formatDateTime } from "@/lib/api";
+import { api, brl, formatDateTime } from "@/lib/api";
 
 type Status = {
   mode: "manual" | "baileys";
@@ -33,6 +33,18 @@ type TestMessage = {
   body: string;
   source: "template" | "padrao";
   internal: boolean;
+};
+
+type Unpaid = {
+  id: string;
+  clientName: string;
+  clientPhone: string;
+  service: string;
+  startAt: string;
+  status: string;
+  totalAmount: string;
+  depositAmount: string;
+  holdExpired: boolean;
 };
 
 type NotificationsResponse = {
@@ -196,6 +208,7 @@ export default function WhatsappPage() {
           </div>
 
           <NtfyCard data={data} onSaved={loadData} />
+          <UnpaidCard onSent={loadData} />
           <TestSendCard manual connected={false} />
 
           {/* Mensagens para enviar */}
@@ -289,6 +302,7 @@ export default function WhatsappPage() {
         <>
           <BaileysPanel st={st} onChanged={loadStatus} />
           <NtfyCard data={data} onSaved={loadData} />
+          <UnpaidCard onSent={loadData} />
           <TestSendCard manual={false} connected={st.status === "connected"} />
           <Logs notifications={notifications} onRetry={retry} onResendAddress={resendAddress} resendingId={resendingId} />
         </>
@@ -501,6 +515,121 @@ function TestSendCard({ manual, connected }: { manual: boolean; connected: boole
           {busy ? "Enviando…" : manual ? "Abrir no WhatsApp" : "Enviar teste"}
         </button>
       </div>
+    </section>
+  );
+}
+
+// Agendamentos que ficaram sem sinal, com botao para cobrar na hora.
+//
+// O automatico cobra 15 min depois de agendar, mas nem sempre resolve: o envio
+// pode ter falhado no WhatsApp, ou o agendamento e anterior a essa
+// funcionalidade existir. Aqui a gestora dispara de novo na mao.
+function UnpaidCard({ onSent }: { onSent: () => Promise<void> | void }) {
+  const [rows, setRows] = useState<Unpaid[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setRows(await api<Unpaid[]>("/api/admin/appointments/unpaid", { auth: true }));
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function cobrar(row: Unpaid) {
+    setSendingId(row.id);
+    setMsg(null);
+    setErr(null);
+    try {
+      const r = await api<{ renewed: boolean; minutes: number | null }>(
+        `/api/admin/appointments/${row.id}/charge-reminder`,
+        { method: "POST", auth: true },
+      );
+      setMsg(
+        r.renewed
+          ? `Cobrança enviada para ${row.clientName}. A reserva foi reaberta por ${r.minutes} minutos.`
+          : `Cobrança enviada para ${row.clientName}.`,
+      );
+      await load();
+      await onSent();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setSendingId(null);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-accent-100 bg-white p-5 shadow-sm shadow-accent-100/40">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-display text-lg text-sand-900">Cobrança do sinal</h2>
+        {rows.length > 0 && (
+          <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700">
+            {rows.length} sem sinal
+          </span>
+        )}
+      </div>
+      <p className="mt-1 text-sm text-sand-500">
+        Agendamentos que ainda não tiveram o sinal pago. A cobrança sai sozinha 15 minutos
+        depois do agendamento — use o botão quando o envio falhar ou o agendamento for antigo.
+      </p>
+
+      {err && (
+        <div className="mt-3 rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+          {err}
+        </div>
+      )}
+      {msg && (
+        <div className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+          {msg}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="mt-4 text-sm text-sand-400">Carregando…</p>
+      ) : rows.length === 0 ? (
+        <p className="mt-4 text-sm text-sand-400">
+          Nenhum agendamento esperando sinal. 🎉
+        </p>
+      ) : (
+        <div className="mt-4 space-y-2">
+          {rows.map((row) => (
+            <div
+              key={row.id}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-accent-100 px-4 py-3"
+            >
+              <div className="min-w-0">
+                <p className="truncate font-medium text-sand-900">{row.clientName}</p>
+                <p className="truncate text-xs text-sand-500">
+                  {row.service} · {formatDateTime(row.startAt)} · sinal {brl(Number(row.depositAmount))}
+                </p>
+                {row.holdExpired && (
+                  <p className="mt-0.5 text-xs text-amber-700">
+                    Reserva vencida — cobrar reabre o prazo, se o horário ainda estiver livre.
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => cobrar(row)}
+                disabled={sendingId === row.id}
+                className="shrink-0 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {sendingId === row.id ? "Enviando…" : "Cobrar sinal"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

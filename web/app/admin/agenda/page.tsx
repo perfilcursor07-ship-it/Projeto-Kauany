@@ -116,6 +116,8 @@ export default function AgendaPage() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const [chargingId, setChargingId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   // A pagina monta com a data de hoje e so depois le ?date= da URL, entao duas
   // buscas saem quase juntas. Sem este contador a resposta da primeira chega
@@ -260,6 +262,30 @@ export default function AgendaPage() {
     }),
   })).filter((group) => group.items.length > 0);
 
+  // Cobranca manual do sinal: usada quando o envio automatico falhou ou quando
+  // o agendamento e anterior a essa funcionalidade existir.
+  async function chargeDeposit(id: string, clientName: string) {
+    setChargingId(id);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await api<{ renewed: boolean; minutes: number | null }>(
+        `/api/admin/appointments/${id}/charge-reminder`,
+        { method: "POST", auth: true },
+      );
+      setNotice(
+        r.renewed
+          ? `Cobrança enviada para ${clientName}. A reserva foi reaberta por ${r.minutes} minutos.`
+          : `Cobrança enviada para ${clientName}.`,
+      );
+      await load();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setChargingId(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
       <section className="flex flex-col gap-4 rounded-lg border border-accent-100 bg-white p-4 shadow-sm shadow-accent-100/40 sm:p-5 lg:flex-row lg:items-center lg:justify-between">
@@ -325,6 +351,11 @@ export default function AgendaPage() {
       </section>
 
       {error && <p className="mb-4 text-red-600">{error}</p>}
+      {notice && (
+        <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+          {notice}
+        </div>
+      )}
 
       {showForm && (
         <form onSubmit={createAppointment} className="rounded-lg border border-accent-100 bg-white p-5 shadow-sm shadow-accent-100/40">
@@ -417,8 +448,10 @@ export default function AgendaPage() {
               key={a.id}
               appt={a}
               removing={removingId === a.id}
+              charging={chargingId === a.id}
               onStatus={setStatus}
               onRemove={removeAppointment}
+              onCharge={chargeDeposit}
             />
           ))}
         </section>
@@ -432,13 +465,17 @@ export default function AgendaPage() {
 function ApptCard({
   appt: a,
   removing,
+  charging,
   onStatus,
   onRemove,
+  onCharge,
 }: {
   appt: Appt;
   removing: boolean;
+  charging: boolean;
   onStatus: (id: string, status: string) => void;
   onRemove: (id: string, clientName: string) => void;
+  onCharge: (id: string, clientName: string) => void;
 }) {
   const st = STATUS_LABEL[a.status] ?? { label: a.status, cls: "bg-sand-50 text-sand-600 border-sand-200" };
   const serviceLabel = a.appointmentServices?.length
@@ -453,6 +490,11 @@ function ApptCard({
   const paid = Number(a.paidAmount);
   const remaining = Number(a.remainingAmount);
   const dead = DEAD_STATUSES.includes(a.status);
+
+  // Da para cobrar o sinal: ainda falta pagar e o agendamento nao foi
+  // cancelado nem concluido.
+  const podeCobrar =
+    ["pending_payment", "expired"].includes(a.status) && paid === 0 && Number(a.depositAmount) > 0;
 
   // Concluir um atendimento nao registra o pagamento do restante, entao o
   // rodape precisa dizer que o valor nao foi lancado em vez de prometer que
@@ -535,11 +577,25 @@ function ApptCard({
         />
       </div>
 
-      {["confirmed", "pending_payment"].includes(a.status) && (
+      {(["confirmed", "pending_payment"].includes(a.status) || podeCobrar) && (
         <div className="flex flex-wrap gap-2 border-t border-accent-100 px-4 py-3">
-          <ActionBtn onClick={() => onStatus(a.id, "completed")}>Concluir</ActionBtn>
-          <ActionBtn onClick={() => onStatus(a.id, "no_show")} variant="warn">Faltou</ActionBtn>
-          <ActionBtn onClick={() => onStatus(a.id, "cancelled")} variant="danger">Cancelar</ActionBtn>
+          {podeCobrar && (
+            <button
+              type="button"
+              onClick={() => onCharge(a.id, a.client.name)}
+              disabled={charging}
+              className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {charging ? "Enviando…" : "Cobrar sinal no WhatsApp"}
+            </button>
+          )}
+          {["confirmed", "pending_payment"].includes(a.status) && (
+            <>
+              <ActionBtn onClick={() => onStatus(a.id, "completed")}>Concluir</ActionBtn>
+              <ActionBtn onClick={() => onStatus(a.id, "no_show")} variant="warn">Faltou</ActionBtn>
+              <ActionBtn onClick={() => onStatus(a.id, "cancelled")} variant="danger">Cancelar</ActionBtn>
+            </>
+          )}
         </div>
       )}
     </div>
