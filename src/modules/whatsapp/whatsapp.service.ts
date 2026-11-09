@@ -285,15 +285,27 @@ async function recordAck(businessId: bigint, messageId: string, status: number):
   );
 }
 
+// WhatsApp passou a ter duas identidades para a mesma pessoa: o telefone
+// (@s.whatsapp.net) e o @lid. A sessao do telefone fica presa e o aparelho
+// mostra "Aguardando mensagem" para sempre. O @lid e a identidade que o
+// celular consegue abrir. O computador ainda le a copia antiga.
+function asLid(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const lid = value.includes('@') ? value : `${value}@lid`;
+  if (!lid.endsWith('@lid')) return null;
+  return jidNormalizedUser(lid);
+}
+
 // Normaliza um telefone BR para JID e confirma se existe no WhatsApp.
 async function resolveJid(sock: WASocket, phone: string): Promise<string | null> {
   let digits = phone.replace(/\D/g, '');
   if (!digits) return null;
   if (!digits.startsWith('55') && digits.length <= 11) digits = '55' + digits;
 
-  const [result] = await sock.onWhatsApp(digits).catch(() => [] as any);
-  if (result?.exists) return result.jid;
-  return null;
+  const results = await sock.onWhatsApp(digits).catch(() => undefined);
+  const result = results?.[0];
+  if (!result?.exists) return null;
+  return asLid(result.lid) ?? result.jid ?? null;
 }
 
 // Forma canonica de um numero BR, ignorando o "9" extra do celular.
@@ -350,27 +362,24 @@ export async function sendText(
   const sock = state.sock;
   const toSelf = isSamePhone(phone, state.phoneNumber);
 
-  // Aviso interno para o proprio numero. onWhatsApp devolve o JID @lid, e
-  // mandar por ele faz o celular mostrar "Aguardando mensagem" para sempre:
-  // o aparelho principal nao consegue abrir o texto. O JID do usuario
-  // conectado (PN) e o mesmo caminho do WhatsApp Web para a conversa "Voce".
+  // Sempre o @lid quando o WhatsApp informa um. Mandar pelo numero antigo
+  // deixa o celular em "Aguardando mensagem" e so o computador abre o texto.
   const jid = toSelf
-    ? (sock.user?.id ? jidNormalizedUser(sock.user.id) : null)
+    ? (asLid(sock.user?.lid) ?? (sock.user?.id ? jidNormalizedUser(sock.user.id) : null))
     : await resolveJid(sock, phone);
   if (!jid) return { ok: false, error: 'Numero nao encontrado no WhatsApp' };
 
   try {
-    if (toSelf) {
-      // Sessao nova com o proprio aparelho. Sem isso o celular guarda o
-      // aviso cifrado e a conversa fica em "Aguardando mensagem".
-      await sock.assertSessions([jid], true).catch(() => {});
-    } else {
-      await sock.presenceSubscribe(jid);
+    // Renegocia a chave com o aparelho. A sessao antiga do telefone fica
+    // presa e o celular nao abre a mensagem seguinte.
+    await sock.assertSessions([jid], true).catch(() => {});
+    if (!toSelf) {
+      await sock.presenceSubscribe(jid).catch(() => {});
       await delay(rand(400, 900));
-      await sock.sendPresenceUpdate('composing', jid);
+      await sock.sendPresenceUpdate('composing', jid).catch(() => {});
       // Tempo de "digitacao" proporcional ao tamanho da mensagem.
       await delay(Math.min(6000, 800 + text.length * rand(20, 45)));
-      await sock.sendPresenceUpdate('paused', jid);
+      await sock.sendPresenceUpdate('paused', jid).catch(() => {});
     }
     // messageId fixo: a fila ja gravou esse id, entao todo ACK casa.
     const sent = await sock.sendMessage(jid, { text }, messageId ? { messageId } : {});
