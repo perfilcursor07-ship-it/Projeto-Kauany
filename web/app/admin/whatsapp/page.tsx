@@ -1045,6 +1045,9 @@ function BaileysPanel({ st, onChanged }: { st: Status; onChanged: () => void }) 
       {st.status === "connected" ? (
         <div>
           <p className="text-sm text-sand-600">Conectado{st.phoneNumber ? ` (+${st.phoneNumber})` : ""}.</p>
+          <p className="mt-2 text-sm text-sand-500">
+            O aviso interno de sinal recebido chega na conversa <strong>Você</strong> deste número.
+          </p>
           <button onClick={disconnect} disabled={busy} className="mt-4 rounded-lg border border-accent-200 bg-accent-50 px-5 py-2.5 text-sm font-medium text-accent-700 hover:bg-accent-100">
             Desconectar
           </button>

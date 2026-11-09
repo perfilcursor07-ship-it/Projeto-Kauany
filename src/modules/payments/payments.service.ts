@@ -352,14 +352,9 @@ async function applyPaidPayment(
 
     // Aviso interno para a GESTORA (sinal recebido).
     //
-    // Sai por PUSH do ntfy, nao por WhatsApp. O destino do aviso e o proprio
-    // studio, e o WhatsApp nao notifica mensagem que voce manda para voce
-    // mesma -- ela cai na conversa "Mensagem para voce mesmo", sem aviso
-    // nenhum no aparelho. O ntfy tem app de iPhone e Android e notifica de
-    // verdade.
-    //
-    // As mensagens da CLIENTE continuam no WhatsApp; isto aqui e so o aviso
-    // interno. Sem ntfy configurado, caimos no WhatsApp como antes.
+    // Vai para a conversa "Voce" do numero conectado. O ntfy, se estiver
+    // configurado, continua como aviso extra no app. As mensagens da cliente
+    // seguem no WhatsApp dela.
     const managerBody = renderTemplate(FALLBACK_BODIES.manager_paid, vars);
 
     if (business?.ntfyTopic) {
@@ -375,22 +370,24 @@ async function applyPaidPayment(
           status: 'pending',
         },
       });
-    } else {
-      const managerPhone = business?.notifyPhone || business?.phone;
-      if (managerPhone && env.WHATSAPP_MODE === 'baileys') {
-        await tx.notificationJob.create({
-          data: {
-            businessId: appointment.businessId,
-            appointmentId: appointment.id,
-            triggerKey: 'manager_paid',
-            channel: 'whatsapp',
-            toPhone: managerPhone,
-            body: managerBody,
-            scheduledFor: new Date(),
-            status: 'pending',
-          },
-        });
-      }
+    }
+
+    // O aviso tambem sai no WhatsApp do numero conectado, na conversa "Voce".
+    // Antes isso era recusado: o celular so via "Aguardando mensagem".
+    const managerPhone = business?.notifyPhone || business?.phone;
+    if (managerPhone && env.WHATSAPP_MODE === 'baileys') {
+      await tx.notificationJob.create({
+        data: {
+          businessId: appointment.businessId,
+          appointmentId: appointment.id,
+          triggerKey: 'manager_paid',
+          channel: 'whatsapp',
+          toPhone: managerPhone,
+          body: managerBody,
+          scheduledFor: new Date(),
+          status: 'pending',
+        },
+      });
     }
   });
 }

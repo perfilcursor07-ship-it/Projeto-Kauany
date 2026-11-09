@@ -222,7 +222,14 @@ async function runOnce() {
     await prisma.notificationJob.updateMany({
       where: { id: job.id, status: 'pending' },
       data: result.ok
-        ? { status: 'sent', sentAt: new Date(), error: null }
+        ? {
+            status: 'sent',
+            sentAt: new Date(),
+            // Mensagem para o proprio numero nao gera recibo de entrega.
+            // Sem isto o painel fica em "sem confirmacao" para sempre.
+            ...(result.self ? { deliveredAt: new Date() } : {}),
+            error: null,
+          }
         : { status: 'failed', error: result.error ?? 'erro desconhecido' },
     });
 

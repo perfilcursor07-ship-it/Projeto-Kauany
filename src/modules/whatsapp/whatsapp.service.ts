@@ -2,6 +2,7 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   generateMessageIDV2,
+  jidNormalizedUser,
   Browsers,
   type WASocket,
 } from '@whiskeysockets/baileys';
@@ -340,38 +341,40 @@ export async function sendText(
   phone: string,
   text: string,
   messageId?: string,
-): Promise<{ ok: boolean; error?: string; messageId?: string }> {
+): Promise<{ ok: boolean; error?: string; messageId?: string; self?: boolean }> {
   const state = getState(businessId);
   if (state.status !== 'connected' || !state.sock) {
     return { ok: false, error: 'WhatsApp desconectado' };
   }
 
   const sock = state.sock;
+  const toSelf = isSamePhone(phone, state.phoneNumber);
 
-  // Enviar para a propria conta conectada nao notifica nada: a mensagem cai na
-  // conversa "Mensagem para voce mesmo" com fromMe=true e o WhatsApp nunca
-  // avisa sobre as suas proprias mensagens. Falha explicita em vez de um
-  // "enviada" mentiroso no painel.
-  if (isSamePhone(phone, state.phoneNumber)) {
-    return {
-      ok: false,
-      error: 'Destino e o proprio numero conectado: o WhatsApp nao notifica mensagens para voce mesmo. Cadastre outro numero para os avisos internos.',
-    };
-  }
-
-  const jid = await resolveJid(sock, phone);
+  // Aviso interno para o proprio numero. onWhatsApp devolve o JID @lid, e
+  // mandar por ele faz o celular mostrar "Aguardando mensagem" para sempre:
+  // o aparelho principal nao consegue abrir o texto. O JID do usuario
+  // conectado (PN) e o mesmo caminho do WhatsApp Web para a conversa "Voce".
+  const jid = toSelf
+    ? (sock.user?.id ? jidNormalizedUser(sock.user.id) : null)
+    : await resolveJid(sock, phone);
   if (!jid) return { ok: false, error: 'Numero nao encontrado no WhatsApp' };
 
   try {
-    await sock.presenceSubscribe(jid);
-    await delay(rand(400, 900));
-    await sock.sendPresenceUpdate('composing', jid);
-    // Tempo de "digitacao" proporcional ao tamanho da mensagem.
-    await delay(Math.min(6000, 800 + text.length * rand(20, 45)));
-    await sock.sendPresenceUpdate('paused', jid);
+    if (toSelf) {
+      // Sessao nova com o proprio aparelho. Sem isso o celular guarda o
+      // aviso cifrado e a conversa fica em "Aguardando mensagem".
+      await sock.assertSessions([jid], true).catch(() => {});
+    } else {
+      await sock.presenceSubscribe(jid);
+      await delay(rand(400, 900));
+      await sock.sendPresenceUpdate('composing', jid);
+      // Tempo de "digitacao" proporcional ao tamanho da mensagem.
+      await delay(Math.min(6000, 800 + text.length * rand(20, 45)));
+      await sock.sendPresenceUpdate('paused', jid);
+    }
     // messageId fixo: a fila ja gravou esse id, entao todo ACK casa.
     const sent = await sock.sendMessage(jid, { text }, messageId ? { messageId } : {});
-    return { ok: true, messageId: sent?.key?.id ?? messageId };
+    return { ok: true, self: toSelf, messageId: sent?.key?.id ?? messageId };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
