@@ -11,6 +11,7 @@ import {
   getPublicAppointmentByToken,
   computeDeposit,
   appointmentServiceLabel,
+  isPublicBookableDate,
   AppointmentError,
 } from '../modules/appointments/appointments.service.js';
 import {
@@ -241,6 +242,10 @@ export async function publicRoutes(app: FastifyInstance) {
       professionalId = prof.id;
     }
 
+    if (!isPublicBookableDate(parsed.data.date)) {
+      return { date: parsed.data.date, slots: [] };
+    }
+
     const slots = await getAvailableSlots({
       businessId: business.id,
       professionalId,
@@ -300,6 +305,10 @@ export async function publicRoutes(app: FastifyInstance) {
 
     const business = await resolvePublicBusiness(parsed.data.slug);
     if (!business) return reply.code(404).send({ message: 'Negocio nao encontrado' });
+
+    if (!isPublicBookableDate(parsed.data.date)) {
+      return reply.code(400).send({ message: 'Agendamento online comeca no dia seguinte' });
+    }
 
     try {
       const { appointment, requiresDeposit } = await createPublicAppointment({

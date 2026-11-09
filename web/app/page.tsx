@@ -323,9 +323,9 @@ export default function BookingPage() {
     });
   }, [expired, created, confirmed]);
 
-  const today = toDateInput(new Date());
+  const firstBookableDay = addDays(new Date(), 1);
   const openWeekdays = businessHours ? businessHours.filter((h) => h.isOpen).map((h) => h.weekday) : null;
-  const visibleDays = getBookableDays(new Date(), openWeekdays, dateOffset, 6);
+  const visibleDays = getBookableDays(firstBookableDay, openWeekdays, dateOffset, 6);
   const nameParts = form.name.trim().split(/\s+/).filter(Boolean);
   const needsLastName = nameParts.length === 1;
   const nameOk = nameParts.length >= 2;
@@ -410,7 +410,7 @@ export default function BookingPage() {
 
   function continueToDate() {
     if (selectedServices.length === 0) return;
-    const firstAvailableDay = getBookableDays(new Date(), openWeekdays, 0, 1)[0];
+    const firstAvailableDay = getBookableDays(addDays(new Date(), 1), openWeekdays, 0, 1)[0];
     setDate(firstAvailableDay ? toDateInput(firstAvailableDay) : "");
     setDateOffset(0);
     setSlots([]);
@@ -726,7 +726,7 @@ export default function BookingPage() {
 
               <div className="rounded-2xl border border-[#ead8ca] bg-[#fffaf6] px-3 py-4">
                 <p className="mb-3 text-center text-sm font-bold text-[#6f452d]">
-                  Selecione o dia:
+                  Selecione o dia. O agendamento começa amanhã.
                 </p>
 
                 {visibleDays.length === 0 ? (

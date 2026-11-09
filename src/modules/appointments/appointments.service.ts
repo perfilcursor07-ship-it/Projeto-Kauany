@@ -70,6 +70,20 @@ export class AppointmentError extends Error {
   }
 }
 
+const SALON_TIMEZONE = 'America/Sao_Paulo';
+
+// Agendamento online so vale a partir do dia seguinte no fuso do estudio.
+// O painel da equipe continua podendo marcar o dia de hoje.
+export function isPublicBookableDate(dateISO: string, now = new Date()): boolean {
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: SALON_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+  return dateISO > today;
+}
+
 export async function expireAppointmentIfNeeded(token: string) {
   const appointment = await prisma.appointment.findUnique({ where: { token } });
   if (
