@@ -84,17 +84,50 @@ export default function DashboardPage() {
 
   const todayKey = localDateKey(new Date());
 
+  const bookedMonth = useMemo(
+    () => (data?.month.appointments ?? []).filter((item) => isBooked(item.status)),
+    [data],
+  );
+
   const dayMap = useMemo(() => {
     const map = new Map<string, MonthDay>();
-    data?.month.days.forEach((day) => map.set(day.date, day));
+    for (const item of bookedMonth) {
+      const key = localDateKey(new Date(item.time));
+      const day = map.get(key) ?? { date: key, count: 0, pendingDeposit: 0, expected: 0 };
+      day.count += 1;
+      day.expected += item.total;
+      map.set(key, day);
+    }
     return map;
-  }, [data]);
+  }, [bookedMonth]);
 
   const dayList = useMemo(() => {
     if (!data) return [];
-    if (selected === todayKey) return data.appointments;
-    return data.month.appointments.filter((item) => localDateKey(new Date(item.time)) === selected);
+    const source = selected === todayKey ? data.appointments : data.month.appointments;
+    return source
+      .filter((item) => isBooked(item.status) && localDateKey(new Date(item.time)) === selected)
+      .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
   }, [data, selected, todayKey]);
+
+  const bookedToday = useMemo(
+    () =>
+      (data?.appointments ?? [])
+        .filter((item) => isBooked(item.status))
+        .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime()),
+    [data],
+  );
+
+  const monthStats = useMemo(() => {
+    const expected = bookedMonth.reduce((sum, item) => sum + item.total, 0);
+    const received = bookedMonth.reduce((sum, item) => sum + receivedOf(item), 0);
+    return {
+      count: bookedMonth.length,
+      completed: bookedMonth.filter((item) => item.status === "completed").length,
+      expected,
+      received,
+      toReceive: Math.max(expected - received, 0),
+    };
+  }, [bookedMonth]);
 
   const dayMoney = useMemo(() => {
     const expected = dayList.reduce((sum, item) => sum + item.total, 0);
@@ -111,8 +144,8 @@ export default function DashboardPage() {
   }
   if (!data) return <DashboardSkeleton />;
 
-  const pending = data.today.pendingDeposit + data.today.needsStatus;
   const isToday = selected === todayKey;
+  const openToday = bookedToday.filter((item) => new Date(item.time).getTime() >= Date.now() && item.status === "confirmed");
   const cells = monthCells(data.month.start);
 
   return (
@@ -121,9 +154,9 @@ export default function DashboardPage() {
         <div>
           <h1 className="font-display text-2xl leading-tight text-sand-900">{formatLongDate(new Date())}</h1>
           <p className="mt-0.5 text-sm text-sand-500">
-            {data.today.count === 0
+            {bookedToday.length === 0
               ? "Nenhum atendimento hoje"
-              : `${data.today.count} atendimento${data.today.count === 1 ? "" : "s"} hoje · ${data.today.remaining} restante${data.today.remaining === 1 ? "" : "s"}`}
+              : bookedToday.map((item) => `${formatTime(item.time)} ${item.client}`).join(" · ")}
           </p>
         </div>
         <div className="flex gap-2">
@@ -144,42 +177,25 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      {data.next && (
+      {openToday[0] && (
         <Link
           href={`/admin/agenda?date=${todayKey}`}
           className="flex flex-wrap items-center gap-3 rounded-xl border border-accent-200 bg-accent-50/70 px-4 py-3 transition hover:bg-accent-50"
         >
           <span className="flex h-11 w-16 shrink-0 items-center justify-center rounded-lg bg-white font-display text-lg text-accent-800 shadow-sm">
-            {formatTime(data.next.time)}
+            {formatTime(openToday[0].time)}
           </span>
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold text-sand-900">
-              {data.next.client} <span className="font-normal text-sand-500">· {data.next.service}</span>
+              {openToday[0].client}{" "}
+              <span className="font-normal text-sand-500">· {openToday[0].service}</span>
             </p>
-            <p className="mt-0.5 text-xs text-accent-700">Próximo atendimento {timeUntil(data.next.time)}</p>
+            <p className="mt-0.5 text-xs text-accent-700">Próximo atendimento {timeUntil(openToday[0].time)}</p>
           </div>
           <div className="flex items-center gap-2">
-            <span className="font-display text-lg text-sand-900">{brl(data.next.total)}</span>
-            <PaymentPill paid={data.next.depositPaid} deposit={data.next.deposit} />
+            <span className="font-display text-lg text-sand-900">{brl(openToday[0].total)}</span>
+            <PaymentPill paid={openToday[0].paymentStatus === "paid" || openToday[0].status === "completed"} deposit={openToday[0].deposit} />
           </div>
-        </Link>
-      )}
-
-      {pending > 0 && (
-        <Link
-          href={`/admin/agenda?date=${todayKey}`}
-          className="flex items-center gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-900 transition hover:bg-amber-100"
-        >
-          <AlertIcon className="h-4 w-4 shrink-0 text-amber-700" />
-          <span className="flex-1">
-            {[
-              data.today.pendingDeposit > 0 && `${data.today.pendingDeposit} aguardando sinal`,
-              data.today.needsStatus > 0 && `${data.today.needsStatus} sem conclusão`,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </span>
-          <ArrowRightIcon className="h-4 w-4 shrink-0" />
         </Link>
       )}
 
@@ -187,11 +203,17 @@ export default function DashboardPage() {
         <div className="rounded-xl border border-accent-100 bg-white shadow-sm shadow-accent-100/30">
           <div className="flex items-center justify-between gap-3 border-b border-accent-50 px-4 py-3">
             <div>
-              <h2 className="font-display text-lg text-sand-900">
-                {isToday ? "Agenda de hoje" : `Agenda de ${formatShortDate(selected)}`}
+              <h2 className="font-display text-2xl leading-none text-sand-900">
+                {dayList.length === 0
+                  ? isToday
+                    ? "Agenda de hoje"
+                    : formatShortDate(selected)
+                  : dayList.map((item) => formatTime(item.time)).join(" · ")}
               </h2>
-              <p className="text-xs text-sand-500">
-                {dayList.length} atendimento{dayList.length === 1 ? "" : "s"}
+              <p className="mt-1 text-xs text-sand-500">
+                {isToday ? "Hoje" : formatShortDate(selected)}
+                {dayList.length > 0 &&
+                  ` · ${dayList.length} atendimento${dayList.length === 1 ? "" : "s"}`}
                 {dayMoney.expected > 0 && ` · previsto ${brl(dayMoney.expected)}`}
               </p>
             </div>
@@ -229,7 +251,7 @@ export default function DashboardPage() {
         <div className="rounded-xl border border-accent-100 bg-white p-4 shadow-sm shadow-accent-100/30">
           <div className="flex items-baseline justify-between gap-2">
             <h2 className="font-display text-lg text-sand-900">{formatMonthName(data.month.start)}</h2>
-            <span className="text-xs font-semibold text-accent-700">{data.month.count} no mês</span>
+            <span className="text-xs font-semibold text-accent-700">{monthStats.count} no mês</span>
           </div>
 
           <div className="mt-3 grid grid-cols-7 gap-1 text-center text-[10px] font-semibold uppercase text-sand-400">
@@ -268,13 +290,7 @@ export default function DashboardPage() {
                       {Array.from({ length: Math.min(day.count, 3) }).map((_, dot) => (
                         <span
                           key={dot}
-                          className={`h-1 w-1 rounded-full ${
-                            isSelected
-                              ? "bg-white"
-                              : dot < day.pendingDeposit
-                                ? "bg-amber-500"
-                                : "bg-accent-600"
-                          }`}
+                          className={`h-1 w-1 rounded-full ${isSelected ? "bg-white" : "bg-accent-600"}`}
                         />
                       ))}
                     </span>
@@ -285,20 +301,17 @@ export default function DashboardPage() {
           </div>
 
           <div className="mt-4 space-y-2 border-t border-accent-50 pt-3 text-sm">
-            <SummaryRow label="Concluídos" value={`${data.month.completed} de ${data.month.count}`} />
-            <SummaryRow label="Recebido" value={brl(data.month.received)} tone="emerald" />
-            <SummaryRow label="A receber" value={brl(data.month.toReceive)} />
-            {data.month.pendingDeposit > 0 && (
-              <SummaryRow label="Sinais pendentes" value={String(data.month.pendingDeposit)} tone="amber" />
-            )}
+            <SummaryRow label="Concluídos" value={`${monthStats.completed} de ${monthStats.count}`} />
+            <SummaryRow label="Recebido" value={brl(monthStats.received)} tone="emerald" />
+            <SummaryRow label="A receber" value={brl(monthStats.toReceive)} />
             <div className="h-1.5 overflow-hidden rounded-full bg-sand-100">
               <div
                 className="h-full rounded-full bg-accent-600"
-                style={{ width: `${progress(data.month.received, data.month.expectedRevenue)}%` }}
+                style={{ width: `${progress(monthStats.received, monthStats.expected)}%` }}
               />
             </div>
             <div className="flex items-center justify-between text-xs text-sand-400">
-              <span>Previsto {brl(data.month.expectedRevenue)}</span>
+              <span>Previsto {brl(monthStats.expected)}</span>
               <Link href="/admin/financeiro" className="font-semibold text-accent-700 hover:text-accent-800">
                 Financeiro →
               </Link>
@@ -318,7 +331,7 @@ function DayRow({ appointment }: { appointment: DashboardAppointment }) {
       href={`/admin/agenda?date=${agendaDate}`}
       className="flex items-center gap-3 px-4 py-3 transition hover:bg-accent-50/60"
     >
-      <span className="flex h-10 w-14 shrink-0 items-center justify-center rounded-lg bg-accent-50 font-display text-base text-accent-800">
+      <span className="w-14 shrink-0 font-display text-xl leading-none text-accent-800">
         {formatTime(appointment.time)}
       </span>
       <div className="min-w-0 flex-1">
@@ -327,19 +340,13 @@ function DayRow({ appointment }: { appointment: DashboardAppointment }) {
           {appointment.service} · {formatPhone(appointment.phone)}
         </p>
       </div>
-      <div className="hidden shrink-0 text-right sm:block">
+      <div className="shrink-0 text-right">
         <p className="text-sm font-semibold text-sand-900">{brl(appointment.total)}</p>
         <p className="text-[11px] text-sand-400">
-          {appointment.paymentStatus === "paid" || appointment.status === "completed"
-            ? "sinal pago"
-            : appointment.deposit > 0
-              ? `sinal ${brl(appointment.deposit)}`
-              : "sem sinal"}
+          {status.label}
+          {(appointment.paymentStatus === "paid" || appointment.status === "completed") && " · sinal pago"}
         </p>
       </div>
-      <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${status.cls}`}>
-        {status.label}
-      </span>
     </Link>
   );
 }
@@ -403,6 +410,10 @@ function receivedOf(appointment: DashboardAppointment) {
   if (appointment.status === "completed") return appointment.total;
   if (appointment.paymentStatus === "paid") return appointment.deposit;
   return 0;
+}
+
+function isBooked(status: string) {
+  return status === "confirmed" || status === "completed";
 }
 
 function statusOf(status: string) {
@@ -502,21 +513,3 @@ function PlusIcon({ className }: { className?: string }) {
   );
 }
 
-function ArrowRightIcon({ className }: { className?: string }) {
-  return (
-    <IconBase className={className}>
-      <path d="M5 12h14" />
-      <path d="m13 6 6 6-6 6" />
-    </IconBase>
-  );
-}
-
-function AlertIcon({ className }: { className?: string }) {
-  return (
-    <IconBase className={className}>
-      <path d="M12 9v4" />
-      <path d="M12 17h.01" />
-      <path d="M10.3 4.2 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0Z" />
-    </IconBase>
-  );
-}
