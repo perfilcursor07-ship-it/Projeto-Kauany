@@ -239,6 +239,12 @@ export default function BookingPage() {
   }, []);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const opensBooking = params.get("agendar") === "1" || params.get("consulta") === "1" || !!params.get("agendamento");
+    if (opensBooking) {
+      setBioChecked(true);
+      return;
+    }
     api<PublicBio>("/api/public/bio")
       .then((data) => {
         setBio(data);

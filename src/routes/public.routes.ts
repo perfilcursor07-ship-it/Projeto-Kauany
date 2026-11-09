@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
@@ -38,6 +38,28 @@ type PublicBioLinkRow = {
   type: string;
   sortOrder: number;
 };
+
+type PublicImageKind = 'logo' | 'avatar' | 'cover' | 'background';
+
+// A imagem fica num endereço proprio. O JSON da pagina deixa de carregar
+// centenas de KB de base64 antes de mostrar o texto.
+function publicImageUrl(kind: PublicImageKind, value: string | null | undefined): string | null {
+  if (!value) return null;
+  if (value.startsWith('data:image/')) return `/api/public/media/${kind}`;
+  return value;
+}
+
+function sendStoredImage(reply: FastifyReply, value: string | null | undefined) {
+  const match = value?.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/);
+  const mime = match?.[1];
+  const payload = match?.[2];
+  if (!mime || !payload) return reply.code(404).send({ message: 'Imagem nao encontrada' });
+  return reply
+    .type(mime)
+    .header('Cache-Control', 'public, max-age=3600')
+    .header('X-Content-Type-Options', 'nosniff')
+    .send(Buffer.from(payload, 'base64'));
+}
 
 type PublicBioDocumentRow = {
   fileData: string | null;
@@ -89,15 +111,15 @@ export async function publicRoutes(app: FastifyInstance) {
         id: business.id.toString(),
         name: business.name,
         slug: business.slug,
-        logoUrl: business.logoUrl,
+        logoUrl: publicImageUrl('logo', business.logoUrl),
       },
       bio: {
         enabled: Boolean(setting?.enabled),
         title: setting?.title || business.name,
         subtitle: setting?.subtitle || null,
-        avatarUrl: setting?.avatarUrl || business.logoUrl,
-        coverUrl: setting?.coverUrl || null,
-        backgroundUrl: setting?.backgroundUrl || null,
+        avatarUrl: publicImageUrl('avatar', setting?.avatarUrl) || publicImageUrl('logo', business.logoUrl),
+        coverUrl: publicImageUrl('cover', setting?.coverUrl),
+        backgroundUrl: publicImageUrl('background', setting?.backgroundUrl),
         instagramUrl: setting?.instagramUrl || null,
       },
       links: links.map((link) => ({
@@ -136,6 +158,35 @@ export async function publicRoutes(app: FastifyInstance) {
       .send(Buffer.from(document.fileData, 'base64'));
   });
 
+  // --- Imagens publicas fora do JSON --------------------------------------
+  app.get('/media/:kind', async (req, reply) => {
+    const parsed = z.object({
+      kind: z.enum(['logo', 'avatar', 'cover', 'background']),
+    }).safeParse(req.params);
+    if (!parsed.success) return reply.code(404).send({ message: 'Imagem nao encontrada' });
+
+    const business = await resolvePublicBusiness();
+    if (!business) return reply.code(404).send({ message: 'Imagem nao encontrada' });
+
+    if (parsed.data.kind === 'logo') return sendStoredImage(reply, business.logoUrl);
+
+    const [setting] = await prisma.$queryRaw<Array<Pick<PublicBioSettingRow, 'avatarUrl' | 'coverUrl' | 'backgroundUrl'>>>`
+      SELECT
+        avatar_url AS avatarUrl,
+        cover_url AS coverUrl,
+        background_url AS backgroundUrl
+      FROM bio_settings
+      WHERE business_id = ${business.id}
+      LIMIT 1
+    `;
+    const stored = parsed.data.kind === 'avatar'
+      ? setting?.avatarUrl
+      : parsed.data.kind === 'cover'
+        ? setting?.coverUrl
+        : setting?.backgroundUrl;
+    return sendStoredImage(reply, stored);
+  });
+
   // --- Lista de servicos ativos ------------------------------------------
   app.get('/services', async (req, reply) => {
     const { slug } = z.object({ slug: z.string().optional() }).parse(req.query);
@@ -162,7 +213,7 @@ export async function publicRoutes(app: FastifyInstance) {
         id: business.id.toString(),
         name: business.name,
         slug: business.slug,
-        logoUrl: business.logoUrl,
+        logoUrl: publicImageUrl('logo', business.logoUrl),
       },
       services: services.map((s) => ({
         id: s.id.toString(),
@@ -374,7 +425,7 @@ export async function publicRoutes(app: FastifyInstance) {
       business: {
         id: business.id.toString(),
         name: business.name,
-        logoUrl: business.logoUrl,
+        logoUrl: publicImageUrl('logo', business.logoUrl),
       },
       appointments: appointments.map((appointment) => {
         const lastPayment = appointment.payments[0];
